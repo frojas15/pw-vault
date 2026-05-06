@@ -160,6 +160,59 @@ button:active {
   display: none;
 }
 
+.tag-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.tag-button {
+  padding: 0.5rem 0.75rem;
+  background: #e8eef7;
+  border: 1px solid #d0dce8;
+  border-radius: 999px;
+  font-size: 0.88rem;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.tag-button:hover {
+  background: #d0dce8;
+}
+
+.tag-button.active {
+  background: var(--brand);
+  color: #fff;
+  border-color: var(--brand);
+}
+
+.item-tags {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin: 0.35rem 0;
+}
+
+.tag-label {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  background: #e3ebf6;
+  color: #0e243f;
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
+.tags-filter {
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+}
+
+.tags-filter p {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
 .strength {
   display: grid;
   gap: 0.3rem;

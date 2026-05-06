@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
-import * as XLSX from 'xlsx'
 import './App.css'
 
 type VaultItem = {
@@ -10,6 +9,7 @@ type VaultItem = {
   password: string
   website: string
   notes: string
+  tags: string[]
   updatedAt: string
 }
 
@@ -23,6 +23,7 @@ type BeforeInstallPromptEvent = Event & {
 }
 
 const STORAGE_KEY = 'password_vault_blob_v1'
+const WEBAUTHN_KEY = 'password_vault_webauthn'
 
 function bytesToBase64(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes))
@@ -122,13 +123,81 @@ function getPasswordStrength(value: string): { label: string; score: number } {
   return { label: labels[Math.max(0, score - 1)], score }
 }
 
+async function lazyLoadXLSX() {
+  const { read, utils } = await import('xlsx')
+  return { read, utils }
+}
+
+async function registerWebAuthn(displayName: string): Promise<boolean> {
+  try {
+    if (!window.PublicKeyCredential) {
+      return false
+    }
+
+    const credential = await navigator.credentials.create?.({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rp: { name: 'Password Vault' },
+        user: {
+          id: crypto.getRandomValues(new Uint8Array(16)),
+          name: displayName,
+          displayName,
+        },
+        pubKeyCredParams: [{ alg: -7, type: 'public-key' }],
+        timeout: 60000,
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          residentKey: 'preferred',
+          userVerification: 'preferred',
+        },
+      } as PublicKeyCredentialCreationOptions,
+    })
+
+    if (!credential) {
+      return false
+    }
+
+    localStorage.setItem(WEBAUTHN_KEY, JSON.stringify({ registered: true, timestamp: Date.now() }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function authenticateWebAuthn(): Promise<boolean> {
+  try {
+    if (!window.PublicKeyCredential) {
+      return false
+    }
+
+    const assertion = await navigator.credentials.get?.({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        timeout: 60000,
+        userVerification: 'preferred',
+      } as PublicKeyCredentialRequestOptions,
+    })
+
+    return !!assertion
+  } catch {
+    return false
+  }
+}
+
+function isWebAuthnAvailable(): boolean {
+  return !!window.PublicKeyCredential && !!localStorage.getItem(WEBAUTHN_KEY)
+}
+
 const emptyForm = {
   title: '',
   username: '',
   password: '',
   website: '',
   notes: '',
+  tags: [] as string[],
 }
+
+const tagOptions = ['Bills', 'Banking', 'Work', 'Personal', 'Social', 'Shopping']
 
 function App() {
   const [masterPassword, setMasterPassword] = useState('')
@@ -146,8 +215,15 @@ function App() {
   const [showFormPassword, setShowFormPassword] = useState(false)
   const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({})
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
+  const [webauthnAvailable, setWebauthnAvailable] = useState(false)
+  const [selectedTags, setSelectedTags] = useState<string[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const backupFileRef = useRef<HTMLInputElement>(null)
   const [hasVault, setHasVault] = useState(() => Boolean(localStorage.getItem(STORAGE_KEY)))
+
+  useEffect(() => {
+    setWebauthnAvailable(isWebAuthnAvailable())
+  }, [])
 
   useEffect(() => {
     if (!isLocked || !masterPassword) {
@@ -197,20 +273,26 @@ function App() {
     }
   }, [isLocked, lockMinutes])
 
+  const allTags = useMemo(() => {
+    const tags = new Set<string>()
+    items.forEach((item) => item.tags.forEach((tag) => tags.add(tag)))
+    return Array.from(tags).sort()
+  }, [items])
+
   const filteredItems = useMemo(() => {
     const q = query.toLowerCase().trim()
     const sorted = [...items].sort((a, b) => a.title.localeCompare(b.title))
 
-    if (!q) {
-      return sorted
-    }
-
     return sorted.filter((item) => {
-      return [item.title, item.username, item.website, item.notes].some((field) =>
-        field.toLowerCase().includes(q),
-      )
+      const matchesQuery =
+        !q ||
+        [item.title, item.username, item.website, item.notes].some((field) => field.toLowerCase().includes(q))
+
+      const matchesTags = selectedTags.length === 0 || selectedTags.some((tag) => item.tags.includes(tag))
+
+      return matchesQuery && matchesTags
     })
-  }, [items, query])
+  }, [items, query, selectedTags])
 
   const passwordStrength = useMemo(() => getPasswordStrength(form.password), [form.password])
 
@@ -249,11 +331,33 @@ function App() {
         return
       }
       const payload = await decryptVault(masterPassword, blob)
-      setItems(payload.items ?? [])
+      setItems((payload.items ?? []).map((item) => ({ ...item, tags: item.tags ?? [] })))
       setIsLocked(false)
       setUnlockError('')
     } catch {
       setUnlockError('Incorrect master password.')
+    }
+  }
+
+  const unlockWithBiometric = async () => {
+    try {
+      const success = await authenticateWebAuthn()
+      if (!success) {
+        setUnlockError('Biometric authentication failed.')
+        return
+      }
+
+      const blob = localStorage.getItem(STORAGE_KEY)
+      if (!blob) {
+        setUnlockError('No vault found.')
+        return
+      }
+      setItems((await decryptVault(masterPassword, blob)).items ?? [])
+      setIsLocked(false)
+      setUnlockError('')
+      setToast('Unlocked with biometric')
+    } catch {
+      setUnlockError('Biometric authentication failed.')
     }
   }
 
@@ -264,6 +368,7 @@ function App() {
     setEditingId(null)
     setQuery('')
     setVisiblePasswords({})
+    setSelectedTags([])
   }
 
   const saveEntry = async (event: FormEvent) => {
@@ -290,6 +395,7 @@ function App() {
       password: item.password,
       website: item.website,
       notes: item.notes,
+      tags: [...item.tags],
     })
   }
 
@@ -309,6 +415,17 @@ function App() {
 
   const togglePasswordVisibility = (id: string) => {
     setVisiblePasswords((current) => ({ ...current, [id]: !current[id] }))
+  }
+
+  const toggleTag = (tag: string) => {
+    setSelectedTags((current) => (current.includes(tag) ? current.filter((t) => t !== tag) : [...current, tag]))
+  }
+
+  const toggleFormTag = (tag: string) => {
+    setForm((current) => ({
+      ...current,
+      tags: current.tags.includes(tag) ? current.tags.filter((t) => t !== tag) : [...current.tags, tag],
+    }))
   }
 
   const parseExcelRows = (rows: Record<string, unknown>[]): VaultItem[] => {
@@ -351,21 +468,23 @@ function App() {
           password,
           website,
           notes: noteParts.join(' | '),
+          tags: [],
           updatedAt: now,
         }
       })
       .filter((item) => Boolean(item.password && (item.username || item.title)))
   }
 
-  const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleExcelImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) {
       return
     }
 
     try {
+      const { read, utils } = await lazyLoadXLSX()
       const buffer = await file.arrayBuffer()
-      const workbook = XLSX.read(buffer)
+      const workbook = read(buffer)
       const firstSheetName = workbook.SheetNames[0]
       if (!firstSheetName) {
         setImportStatus('Import failed: no sheet found.')
@@ -373,7 +492,7 @@ function App() {
       }
 
       const sheet = workbook.Sheets[firstSheetName]
-      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' })
+      const rows = utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' })
       const imported = parseExcelRows(rows)
 
       if (imported.length === 0) {
@@ -404,8 +523,77 @@ function App() {
     }
   }
 
-  const openImportPicker = () => {
+  const exportVault = async () => {
+    const now = new Date().toISOString().slice(0, 10)
+    const blob = new Blob([JSON.stringify({ items, exportedAt: now }, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `vault-backup-${now}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    setToast('Backup downloaded')
+  }
+
+  const handleVaultImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    try {
+      const text = await file.text()
+      const data = JSON.parse(text) as { items: VaultItem[] }
+
+      if (!Array.isArray(data.items)) {
+        setImportStatus('Invalid backup file format.')
+        return
+      }
+
+      const normalized = data.items.map((item) => ({ ...item, tags: item.tags ?? [] }))
+      const existingByKey = new Map(
+        items.map((item) => [
+          `${item.title.toLowerCase()}|${item.username.toLowerCase()}|${item.website.toLowerCase()}`,
+          item,
+        ]),
+      )
+
+      for (const importedItem of normalized) {
+        const key = `${importedItem.title.toLowerCase()}|${importedItem.username.toLowerCase()}|${importedItem.website.toLowerCase()}`
+        existingByKey.set(key, importedItem)
+      }
+
+      const merged = Array.from(existingByKey.values())
+      await persistItems(merged)
+      setImportStatus(`Restored ${normalized.length} entries.`)
+      setToast('Restore complete')
+    } catch {
+      setImportStatus('Restore failed: invalid or corrupted backup file.')
+    } finally {
+      event.target.value = ''
+    }
+  }
+
+  const registerBiometric = async () => {
+    try {
+      const success = await registerWebAuthn('Password Vault User')
+      if (success) {
+        setWebauthnAvailable(true)
+        setToast('Biometric registered')
+      } else {
+        setUnlockError('Biometric registration not available on this device.')
+      }
+    } catch {
+      setUnlockError('Biometric registration failed.')
+    }
+  }
+
+  const openExcelImportPicker = () => {
     fileInputRef.current?.click()
+  }
+
+  const openVaultImportPicker = () => {
+    backupFileRef.current?.click()
   }
 
   const installApp = async () => {
@@ -471,6 +659,11 @@ function App() {
                 />
               </label>
               <button type="submit">Unlock</button>
+              {webauthnAvailable && (
+                <button type="button" className="secondary" onClick={unlockWithBiometric}>
+                  Unlock with Biometric
+                </button>
+              )}
             </form>
           )}
           {unlockError && <p className="error">{unlockError}</p>}
@@ -494,8 +687,14 @@ function App() {
                 <option value={15}>15 minutes</option>
               </select>
             </label>
-            <button type="button" className="secondary" onClick={openImportPicker}>
+            <button type="button" className="secondary" onClick={openExcelImportPicker}>
               Import Excel
+            </button>
+            <button type="button" className="secondary" onClick={exportVault}>
+              Export
+            </button>
+            <button type="button" className="secondary" onClick={openVaultImportPicker}>
+              Restore
             </button>
             <button type="button" onClick={lockNow} className="secondary">
               Lock now
@@ -504,12 +703,31 @@ function App() {
               ref={fileInputRef}
               type="file"
               accept=".xlsx,.xls,.csv"
-              onChange={handleImport}
+              onChange={handleExcelImport}
               className="hidden"
             />
+            <input ref={backupFileRef} type="file" accept=".json" onChange={handleVaultImport} className="hidden" />
           </section>
 
           {importStatus && <p className="import-status">{importStatus}</p>}
+
+          {allTags.length > 0 && (
+            <section className="card tags-filter">
+              <p>Filter by tags:</p>
+              <div className="tag-buttons">
+                {allTags.map((tag) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    className={`tag-button ${selectedTags.includes(tag) ? 'active' : ''}`}
+                    onClick={() => toggleTag(tag)}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
 
           <section className="card">
             <form onSubmit={saveEntry} className="stack">
@@ -572,6 +790,21 @@ function App() {
                   rows={3}
                 />
               </label>
+              <label>
+                Tags
+                <div className="tag-buttons">
+                  {tagOptions.map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      className={`tag-button ${form.tags.includes(tag) ? 'active' : ''}`}
+                      onClick={() => toggleFormTag(tag)}
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              </label>
               <div className="inline">
                 <button type="submit">{editingId ? 'Update' : 'Save'}</button>
                 {editingId && (
@@ -605,6 +838,15 @@ function App() {
                       </a>
                     )}
                     <p className="masked">{visiblePasswords[item.id] ? item.password : '••••••••••••'}</p>
+                    {item.tags.length > 0 && (
+                      <div className="item-tags">
+                        {item.tags.map((tag) => (
+                          <span key={tag} className="tag-label">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     <p className="updated">Updated {new Date(item.updatedAt).toLocaleString()}</p>
                   </div>
                   <div className="inline">
@@ -615,7 +857,7 @@ function App() {
                       Copy Password
                     </button>
                     <button type="button" className="secondary" onClick={() => togglePasswordVisibility(item.id)}>
-                      {visiblePasswords[item.id] ? 'Hide Password' : 'Show Password'}
+                      {visiblePasswords[item.id] ? 'Hide' : 'Show'}
                     </button>
                   </div>
                   <div className="inline">
@@ -630,6 +872,16 @@ function App() {
               ))
             )}
           </section>
+
+          {!webauthnAvailable && (
+            <section className="card">
+              <p>
+                <button type="button" className="secondary" onClick={registerBiometric}>
+                  Register Biometric for Faster Unlock
+                </button>
+              </p>
+            </section>
+          )}
         </>
       )}
     </div>
