@@ -227,14 +227,6 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!isLocked || !masterPassword) {
-      return
-    }
-
-    setMasterPassword('')
-  }, [isLocked, masterPassword])
-
-  useEffect(() => {
     if (!toast) {
       return
     }
@@ -258,7 +250,7 @@ function App() {
     }
 
     const timeoutMs = lockMinutes * 60 * 1000
-    let timeout = window.setTimeout(() => setIsLocked(true), timeoutMs)
+    let timeout = window.setTimeout(() => { setIsLocked(true); setMasterPassword('') }, timeoutMs)
 
     const resetLockTimer = () => {
       clearTimeout(timeout)
@@ -364,6 +356,7 @@ function App() {
 
   const lockNow = () => {
     setIsLocked(true)
+    setMasterPassword('')
     setItems([])
     setForm(emptyForm)
     setEditingId(null)
