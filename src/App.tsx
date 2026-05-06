@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ChangeEvent, FormEvent } from 'react'
+import * as XLSX from 'xlsx'
 import './App.css'
 
 type VaultItem = {
@@ -14,6 +15,11 @@ type VaultItem = {
 
 type VaultPayload = {
   items: VaultItem[]
+}
+
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
 }
 
 const STORAGE_KEY = 'password_vault_blob_v1'
@@ -87,6 +93,35 @@ function generatePassword(length: number): string {
   return Array.from(bytes, (byte) => chars[byte % chars.length]).join('')
 }
 
+function normalizeHeader(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, '').trim()
+}
+
+function toText(value: unknown): string {
+  if (value === null || value === undefined) {
+    return ''
+  }
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10)
+  }
+  return String(value).trim()
+}
+
+function getPasswordStrength(value: string): { label: string; score: number } {
+  if (!value) {
+    return { label: 'Empty', score: 0 }
+  }
+
+  let score = 0
+  if (value.length >= 10) score += 1
+  if (/[A-Z]/.test(value) && /[a-z]/.test(value)) score += 1
+  if (/\d/.test(value)) score += 1
+  if (/[^A-Za-z0-9]/.test(value)) score += 1
+
+  const labels = ['Weak', 'Fair', 'Good', 'Strong']
+  return { label: labels[Math.max(0, score - 1)], score }
+}
+
 const emptyForm = {
   title: '',
   username: '',
@@ -106,6 +141,12 @@ function App() {
   const [form, setForm] = useState(emptyForm)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [lockMinutes, setLockMinutes] = useState(5)
+  const [toast, setToast] = useState('')
+  const [importStatus, setImportStatus] = useState('')
+  const [showFormPassword, setShowFormPassword] = useState(false)
+  const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({})
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [hasVault, setHasVault] = useState(() => Boolean(localStorage.getItem(STORAGE_KEY)))
 
   useEffect(() => {
@@ -115,6 +156,24 @@ function App() {
 
     setMasterPassword('')
   }, [isLocked, masterPassword])
+
+  useEffect(() => {
+    if (!toast) {
+      return
+    }
+    const timeout = window.setTimeout(() => setToast(''), 1500)
+    return () => window.clearTimeout(timeout)
+  }, [toast])
+
+  useEffect(() => {
+    const onBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault()
+      setInstallPrompt(event as BeforeInstallPromptEvent)
+    }
+
+    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+    return () => window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+  }, [])
 
   useEffect(() => {
     if (isLocked) {
@@ -140,16 +199,20 @@ function App() {
 
   const filteredItems = useMemo(() => {
     const q = query.toLowerCase().trim()
+    const sorted = [...items].sort((a, b) => a.title.localeCompare(b.title))
+
     if (!q) {
-      return items
+      return sorted
     }
 
-    return items.filter((item) => {
+    return sorted.filter((item) => {
       return [item.title, item.username, item.website, item.notes].some((field) =>
         field.toLowerCase().includes(q),
       )
     })
   }, [items, query])
+
+  const passwordStrength = useMemo(() => getPasswordStrength(form.password), [form.password])
 
   const persistItems = async (nextItems: VaultItem[]) => {
     const blob = await encryptVault(masterPassword, { items: nextItems })
@@ -200,6 +263,7 @@ function App() {
     setForm(emptyForm)
     setEditingId(null)
     setQuery('')
+    setVisiblePasswords({})
   }
 
   const saveEntry = async (event: FormEvent) => {
@@ -237,17 +301,137 @@ function App() {
   const copyText = async (value: string) => {
     try {
       await navigator.clipboard.writeText(value)
+      setToast('Copied')
     } catch {
       window.alert('Clipboard access failed. Use a secure HTTPS context.')
     }
   }
 
+  const togglePasswordVisibility = (id: string) => {
+    setVisiblePasswords((current) => ({ ...current, [id]: !current[id] }))
+  }
+
+  const parseExcelRows = (rows: Record<string, unknown>[]): VaultItem[] => {
+    const now = new Date().toISOString()
+
+    return rows
+      .map((row) => {
+        const normalized = new Map<string, string>()
+        for (const [key, value] of Object.entries(row)) {
+          normalized.set(normalizeHeader(key), toText(value))
+        }
+
+        const company = normalized.get('company') ?? ''
+        const account = normalized.get('account') ?? ''
+        const service = normalized.get('service') ?? ''
+        const username = normalized.get('username') ?? ''
+        const password = normalized.get('password') ?? ''
+        const due = normalized.get('due') ?? ''
+        const recurring = normalized.get('recurring') ?? ''
+        const payment = normalized.get('payment') ?? ''
+        const balance = normalized.get('balance') ?? ''
+        const notes = normalized.get('notes') ?? ''
+
+        const title = company || service || account || 'Imported Entry'
+        const website = service
+
+        const noteParts = [
+          notes && `Notes: ${notes}`,
+          account && `Account: ${account}`,
+          due && `Due: ${due}`,
+          recurring && `Recurring: ${recurring}`,
+          payment && `Payment: ${payment}`,
+          balance && `Balance: ${balance}`,
+        ].filter(Boolean)
+
+        return {
+          id: crypto.randomUUID(),
+          title,
+          username,
+          password,
+          website,
+          notes: noteParts.join(' | '),
+          updatedAt: now,
+        }
+      })
+      .filter((item) => Boolean(item.password && (item.username || item.title)))
+  }
+
+  const handleImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    try {
+      const buffer = await file.arrayBuffer()
+      const workbook = XLSX.read(buffer)
+      const firstSheetName = workbook.SheetNames[0]
+      if (!firstSheetName) {
+        setImportStatus('Import failed: no sheet found.')
+        return
+      }
+
+      const sheet = workbook.Sheets[firstSheetName]
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' })
+      const imported = parseExcelRows(rows)
+
+      if (imported.length === 0) {
+        setImportStatus('No rows with password data were found.')
+        return
+      }
+
+      const existingByKey = new Map(
+        items.map((item) => [
+          `${item.title.toLowerCase()}|${item.username.toLowerCase()}|${item.website.toLowerCase()}`,
+          item,
+        ]),
+      )
+
+      for (const importedItem of imported) {
+        const key = `${importedItem.title.toLowerCase()}|${importedItem.username.toLowerCase()}|${importedItem.website.toLowerCase()}`
+        existingByKey.set(key, importedItem)
+      }
+
+      const merged = Array.from(existingByKey.values())
+      await persistItems(merged)
+      setImportStatus(`Imported ${imported.length} entries from ${file.name}.`)
+      setToast('Import complete')
+    } catch {
+      setImportStatus('Import failed: unsupported or corrupted file.')
+    } finally {
+      event.target.value = ''
+    }
+  }
+
+  const openImportPicker = () => {
+    fileInputRef.current?.click()
+  }
+
+  const installApp = async () => {
+    if (!installPrompt) {
+      return
+    }
+    await installPrompt.prompt()
+    await installPrompt.userChoice
+    setInstallPrompt(null)
+  }
+
   return (
     <div className="app-shell">
       <header className="app-header">
-        <h1>Password Vault</h1>
-        <p>Encrypted local vault for your phone and desktop browser.</p>
+        <div>
+          <h1>Password Vault</h1>
+          <p>Encrypted local vault for your phone and desktop browser.</p>
+        </div>
+        {!isLocked && installPrompt && (
+          <button type="button" className="install" onClick={installApp}>
+            Install App
+          </button>
+        )}
       </header>
+
+      {toast && <p className="toast">{toast}</p>}
 
       {isLocked ? (
         <section className="card">
@@ -304,19 +488,28 @@ function App() {
             </label>
             <label>
               Auto-lock
-              <select
-                value={lockMinutes}
-                onChange={(event) => setLockMinutes(Number(event.target.value))}
-              >
+              <select value={lockMinutes} onChange={(event) => setLockMinutes(Number(event.target.value))}>
                 <option value={1}>1 minute</option>
                 <option value={5}>5 minutes</option>
                 <option value={15}>15 minutes</option>
               </select>
             </label>
+            <button type="button" className="secondary" onClick={openImportPicker}>
+              Import Excel
+            </button>
             <button type="button" onClick={lockNow} className="secondary">
               Lock now
             </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              onChange={handleImport}
+              className="hidden"
+            />
           </section>
+
+          {importStatus && <p className="import-status">{importStatus}</p>}
 
           <section className="card">
             <form onSubmit={saveEntry} className="stack">
@@ -342,10 +535,14 @@ function App() {
                 Password
                 <div className="inline">
                   <input
+                    type={showFormPassword ? 'text' : 'password'}
                     value={form.password}
                     onChange={(event) => setForm({ ...form, password: event.target.value })}
                     required
                   />
+                  <button type="button" className="secondary" onClick={() => setShowFormPassword((v) => !v)}>
+                    {showFormPassword ? 'Hide' : 'Show'}
+                  </button>
                   <button
                     type="button"
                     className="secondary"
@@ -355,6 +552,10 @@ function App() {
                   </button>
                 </div>
               </label>
+              <div className="strength">
+                <div className={`strength-bar score-${passwordStrength.score}`} />
+                <p>Password strength: {passwordStrength.label}</p>
+              </div>
               <label>
                 Website
                 <input
@@ -399,10 +600,12 @@ function App() {
                     <h3>{item.title}</h3>
                     <p>{item.username}</p>
                     {item.website && (
-                      <a href={item.website} target="_blank" rel="noreferrer">
+                      <a href={item.website.startsWith('http') ? item.website : `https://${item.website}`} target="_blank" rel="noreferrer">
                         {item.website}
                       </a>
                     )}
+                    <p className="masked">{visiblePasswords[item.id] ? item.password : '••••••••••••'}</p>
+                    <p className="updated">Updated {new Date(item.updatedAt).toLocaleString()}</p>
                   </div>
                   <div className="inline">
                     <button type="button" className="secondary" onClick={() => copyText(item.username)}>
@@ -410,6 +613,9 @@ function App() {
                     </button>
                     <button type="button" className="secondary" onClick={() => copyText(item.password)}>
                       Copy Password
+                    </button>
+                    <button type="button" className="secondary" onClick={() => togglePasswordVisibility(item.id)}>
+                      {visiblePasswords[item.id] ? 'Hide Password' : 'Show Password'}
                     </button>
                   </div>
                   <div className="inline">
