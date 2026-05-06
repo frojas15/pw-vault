@@ -432,11 +432,11 @@ function App() {
           normalized.set(normalizeHeader(key), toText(value))
         }
 
-        const company = normalized.get('company') ?? ''
+        const company = normalized.get('company') ?? normalized.get('title') ?? ''
         const account = normalized.get('account') ?? ''
-        const service = normalized.get('service') ?? ''
-        const username = normalized.get('username') ?? ''
-        const password = normalized.get('password') ?? ''
+        const service = normalized.get('service') ?? normalized.get('website') ?? normalized.get('site') ?? ''
+        const username = normalized.get('username') ?? normalized.get('user') ?? normalized.get('login') ?? normalized.get('email') ?? ''
+        const password = normalized.get('password') ?? normalized.get('passcode') ?? normalized.get('pwd') ?? ''
         const due = normalized.get('due') ?? ''
         const recurring = normalized.get('recurring') ?? ''
         const payment = normalized.get('payment') ?? ''
@@ -479,18 +479,55 @@ function App() {
       const { read, utils } = await lazyLoadXLSX()
       const buffer = await file.arrayBuffer()
       const workbook = read(buffer)
-      const firstSheetName = workbook.SheetNames[0]
-      if (!firstSheetName) {
-        setImportStatus('Import failed: no sheet found.')
-        return
+      const importedAllSheets: VaultItem[] = []
+
+      const detectHeaderRow = (grid: unknown[][]): number => {
+        for (let rowIndex = 0; rowIndex < Math.min(grid.length, 20); rowIndex += 1) {
+          const cells = (grid[rowIndex] ?? []).map((cell) => normalizeHeader(toText(cell)))
+          const hasPassword = cells.includes('password') || cells.includes('passcode') || cells.includes('pwd')
+          const hasIdentity =
+            cells.includes('username') ||
+            cells.includes('user') ||
+            cells.includes('login') ||
+            cells.includes('email') ||
+            cells.includes('company') ||
+            cells.includes('account') ||
+            cells.includes('service')
+
+          if (hasPassword && hasIdentity) {
+            return rowIndex
+          }
+        }
+        return -1
       }
 
-      const sheet = workbook.Sheets[firstSheetName]
-      const rows = utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' })
-      const imported = parseExcelRows(rows)
+      for (const sheetName of workbook.SheetNames) {
+        const sheet = workbook.Sheets[sheetName]
+        const grid = utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' }) as unknown[][]
+        const headerRowIndex = detectHeaderRow(grid)
+        if (headerRowIndex < 0) {
+          continue
+        }
 
-      if (imported.length === 0) {
-        setImportStatus('No rows with password data were found.')
+        const headers = (grid[headerRowIndex] ?? []).map((cell) => toText(cell))
+        const rowObjects = grid
+          .slice(headerRowIndex + 1)
+          .filter((row) => row.some((cell) => toText(cell) !== ''))
+          .map((row) => {
+            const rowObject: Record<string, unknown> = {}
+            headers.forEach((header, index) => {
+              if (header) {
+                rowObject[header] = row[index] ?? ''
+              }
+            })
+            return rowObject
+          })
+
+        importedAllSheets.push(...parseExcelRows(rowObjects))
+      }
+
+      if (importedAllSheets.length === 0) {
+        setImportStatus('No rows with password data were found. Check that a sheet has Password and Username columns.')
         return
       }
 
@@ -501,14 +538,14 @@ function App() {
         ]),
       )
 
-      for (const importedItem of imported) {
+      for (const importedItem of importedAllSheets) {
         const key = `${importedItem.title.toLowerCase()}|${importedItem.username.toLowerCase()}|${importedItem.website.toLowerCase()}`
         existingByKey.set(key, importedItem)
       }
 
       const merged = Array.from(existingByKey.values())
       await persistItems(merged)
-      setImportStatus(`Imported ${imported.length} entries from ${file.name}.`)
+      setImportStatus(`Imported ${importedAllSheets.length} entries from ${file.name}.`)
       setToast('Import complete')
     } catch {
       setImportStatus('Import failed: unsupported or corrupted file.')
@@ -516,7 +553,6 @@ function App() {
       event.target.value = ''
     }
   }
-
   const exportVault = async () => {
     const now = new Date().toISOString().slice(0, 10)
     const blob = new Blob([JSON.stringify({ items, exportedAt: now }, null, 2)], { type: 'application/json' })
@@ -885,3 +921,4 @@ function App() {
 }
 
 export default App
+
