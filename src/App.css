@@ -1,0 +1,149 @@
+.app-shell {
+  width: min(980px, 100% - 2rem);
+  margin: 2rem auto 4rem;
+}
+
+.app-header {
+  margin-bottom: 1.4rem;
+  animation: rise 450ms ease-out;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: clamp(2rem, 3.5vw, 3rem);
+}
+
+.app-header p {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+}
+
+.card {
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.75));
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 1rem;
+  box-shadow: 0 14px 45px rgba(7, 19, 42, 0.08);
+  backdrop-filter: blur(6px);
+  margin-bottom: 1rem;
+  animation: rise 350ms ease-out;
+}
+
+.stack {
+  display: grid;
+  gap: 0.75rem;
+}
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.95rem;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.65rem 0.75rem;
+  background: rgba(255, 255, 255, 0.86);
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  padding: 0.62rem 0.9rem;
+  background: var(--brand);
+  color: #fff;
+  cursor: pointer;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button:active {
+  transform: translateY(0);
+}
+
+.secondary {
+  background: #f4f7fb;
+  color: #0e243f;
+  border: 1px solid var(--line);
+}
+
+.danger {
+  background: #d11f4f;
+}
+
+.controls {
+  display: grid;
+  gap: 0.7rem;
+  grid-template-columns: 1fr;
+}
+
+.inline {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.entries {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.item h3 {
+  margin: 0 0 0.2rem;
+}
+
+.item p {
+  margin: 0 0 0.25rem;
+  color: var(--muted);
+}
+
+.item a {
+  color: var(--brand);
+}
+
+.empty,
+.error {
+  margin: 0;
+}
+
+.error {
+  color: #c02553;
+}
+
+@keyframes rise {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@media (min-width: 760px) {
+  .controls {
+    grid-template-columns: 2fr 1fr auto;
+    align-items: end;
+  }
+}
