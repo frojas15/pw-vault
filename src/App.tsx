@@ -207,9 +207,10 @@ function App() {
   const [isLocked, setIsLocked] = useState(true)
   const [items, setItems] = useState<VaultItem[]>([])
   const [query, setQuery] = useState('')
+  const isPhone = window.matchMedia('(pointer: coarse)').matches
   const [form, setForm] = useState(emptyForm)
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [lockMinutes, setLockMinutes] = useState(5)
+  const [lockMinutes, setLockMinutes] = useState(isPhone ? 3 : 15)
   const [toast, setToast] = useState('')
   const [importStatus, setImportStatus] = useState('')
   const [showFormPassword, setShowFormPassword] = useState(false)
@@ -683,8 +684,10 @@ function App() {
               Auto-lock
               <select value={lockMinutes} onChange={(event) => setLockMinutes(Number(event.target.value))}>
                 <option value={1}>1 minute</option>
+                <option value={3}>3 minutes</option>
                 <option value={5}>5 minutes</option>
                 <option value={15}>15 minutes</option>
+                <option value={30}>30 minutes</option>
               </select>
             </label>
             <button type="button" className="secondary" onClick={openExcelImportPicker}>
