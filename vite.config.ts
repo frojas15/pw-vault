@@ -5,7 +5,7 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: '/pw-vault/',
+  base: '/',
   plugins: [
     react(),
     babel({ presets: [reactCompilerPreset()] }),
@@ -18,10 +18,10 @@ export default defineConfig({
         theme_color: '#0d80c6',
         background_color: '#f5f8ff',
         display: 'standalone',
-        scope: '/pw-vault/',
-        start_url: '/pw-vault/',
+        scope: '/',
+        start_url: '/',
         icons: [
-          { src: '/pw-vault/icons.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
+          { src: '/icons.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
         ],
       },
       workbox: {
