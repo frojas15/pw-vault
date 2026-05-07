@@ -99,11 +99,77 @@ button:active {
   white-space: nowrap;
 }
 
+/* ── Controls bar ── */
+
 .controls {
   display: grid;
   gap: 0.7rem;
   grid-template-columns: 1fr;
 }
+
+.controls-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ── Search with clear button ── */
+
+.search-wrap {
+  position: relative;
+}
+
+.search-wrap input {
+  padding-right: 2.4rem;
+}
+
+.clear-search {
+  position: absolute;
+  right: 0.45rem;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 0.2rem 0.35rem;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.clear-search:hover {
+  background: rgba(0, 0, 0, 0.07);
+  transform: translateY(-50%);
+}
+
+/* ── Entry count ── */
+
+.entry-count {
+  margin: -0.4rem 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* ── Biometric prompt banner ── */
+
+.biometric-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  background: linear-gradient(160deg, rgba(13, 128, 198, 0.07), rgba(255, 255, 255, 0.88));
+  border-color: rgba(13, 128, 198, 0.25);
+}
+
+.biometric-prompt p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* ── Inline layout ── */
 
 .inline {
   display: flex;
@@ -111,6 +177,8 @@ button:active {
   flex-wrap: wrap;
   align-items: center;
 }
+
+/* ── Entry list ── */
 
 .entries {
   display: grid;
@@ -131,40 +199,66 @@ button:active {
   overflow-wrap: anywhere;
 }
 
+/* Favicon + title row */
+.item-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.2rem;
+}
+
+.item-title h3 {
+  margin: 0;
+}
+
+.favicon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+
 .masked {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: #10263f;
+}
+
+/* Password age warning */
+.age-warning {
+  font-size: 0.82rem;
+  color: #b45309;
+  margin: 0.2rem 0;
+}
+
+/* Notes in item card */
+.item-notes {
+  font-size: 0.83rem;
+  color: var(--muted);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+  margin: 0.2rem 0;
 }
 
 .updated {
   font-size: 0.82rem;
 }
 
-.empty,
-.error,
-.import-status,
-.toast {
-  margin: 0;
-}
+/* ── Tags ── */
 
-.error {
-  color: #c02553;
-}
-
-.import-status {
-  margin: 0.35rem 0 1rem;
-  color: #183f69;
-}
-
-.hidden {
-  display: none;
+.tag-label-heading {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
 }
 
 .tag-buttons {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
-  margin-top: 0.5rem;
+  margin-top: 0.35rem;
 }
 
 .tag-button {
@@ -213,6 +307,20 @@ button:active {
   font-size: 0.95rem;
 }
 
+/* ── Custom tag input ── */
+
+.custom-tag-input {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.custom-tag-input input {
+  flex: 1;
+}
+
+/* ── Password strength bar ── */
+
 .strength {
   display: grid;
   gap: 0.3rem;
@@ -224,31 +332,50 @@ button:active {
   font-size: 0.88rem;
 }
 
+/* Track */
 .strength-bar {
   height: 8px;
   border-radius: 999px;
   background: #d7e0ec;
-  transition: background 150ms ease;
+  overflow: hidden;
+  position: relative;
 }
 
-.score-0 {
-  background: #e3e8f0;
+/* Animated fill via ::after */
+.strength-bar::after {
+  content: '';
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 300ms ease, background 300ms ease;
 }
 
-.score-1 {
-  background: #f16666;
+.score-0::after { width: 0%; background: transparent; }
+.score-1::after { width: 25%; background: #f16666; }
+.score-2::after { width: 50%; background: #f1ae4f; }
+.score-3::after { width: 75%; background: #67c28b; }
+.score-4::after { width: 100%; background: #3ea76a; }
+
+/* ── Feedback messages ── */
+
+.empty,
+.error,
+.import-status,
+.toast {
+  margin: 0;
 }
 
-.score-2 {
-  background: #f1ae4f;
+.error {
+  color: #c02553;
 }
 
-.score-3 {
-  background: #67c28b;
+.import-status {
+  margin: 0.35rem 0 1rem;
+  color: #183f69;
 }
 
-.score-4 {
-  background: #3ea76a;
+.hidden {
+  display: none;
 }
 
 .toast {
@@ -277,7 +404,7 @@ button:active {
 
 @media (min-width: 820px) {
   .controls {
-    grid-template-columns: 2fr 1fr auto auto;
+    grid-template-columns: 2fr 1fr 1fr auto;
     align-items: end;
   }
 

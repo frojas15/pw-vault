@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, FormEvent } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ChangeEvent, KeyboardEvent } from 'react'
 import './App.css'
 
 type VaultItem = {
@@ -22,15 +22,61 @@ type BeforeInstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
 }
 
+type EncryptedBlob = {
+  salt?: string
+  iv: string
+  data: string
+  version: number
+}
+
+type WebAuthnVaultCredential = {
+  credentialId: string
+  prfSalt: string
+  wrappedMasterPassword: EncryptedBlob
+  timestamp: number
+  version: number
+}
+
+type PrfResults = AuthenticationExtensionsClientOutputs & {
+  prf?: {
+    enabled?: boolean
+    results?: {
+      first?: ArrayBuffer
+    }
+  }
+}
+
+type SortOrder = 'alpha' | 'recent'
+
 const STORAGE_KEY = 'password_vault_blob_v1'
 const WEBAUTHN_KEY = 'password_vault_webauthn'
+const PASSWORD_GROUPS = [
+  'ABCDEFGHJKLMNPQRSTUVWXYZ',
+  'abcdefghijkmnpqrstuvwxyz',
+  '23456789',
+  '!@#$%&*?',
+]
+
+// Evaluated once at module load — safe to keep outside the component
+const isPhone = window.matchMedia('(pointer: coarse)').matches
 
 function bytesToBase64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
+  let binary = ''
+  const chunkSize = 0x8000
+
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.slice(index, index + chunkSize))
+  }
+
+  return btoa(binary)
 }
 
 function base64ToBytes(value: string): Uint8Array {
   return Uint8Array.from(atob(value), (char) => char.charCodeAt(0))
+}
+
+function bytesToBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.slice().buffer
 }
 
 async function deriveKey(masterPassword: string, salt: Uint8Array): Promise<CryptoKey> {
@@ -57,6 +103,24 @@ async function deriveKey(masterPassword: string, salt: Uint8Array): Promise<Cryp
   )
 }
 
+async function deriveBiometricWrappingKey(secret: Uint8Array): Promise<CryptoKey> {
+  const encoder = new TextEncoder()
+  const keyMaterial = await crypto.subtle.importKey('raw', bytesToBuffer(secret), { name: 'HKDF' }, false, ['deriveKey'])
+
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      salt: encoder.encode('password-vault-biometric-v1'),
+      info: encoder.encode('master-password-wrap'),
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  )
+}
+
 async function encryptVault(masterPassword: string, payload: VaultPayload): Promise<string> {
   const encoder = new TextEncoder()
   const salt = crypto.getRandomValues(new Uint8Array(16))
@@ -74,7 +138,10 @@ async function encryptVault(masterPassword: string, payload: VaultPayload): Prom
 }
 
 async function decryptVault(masterPassword: string, vaultBlob: string): Promise<VaultPayload> {
-  const parsed = JSON.parse(vaultBlob) as { salt: string; iv: string; data: string }
+  const parsed = JSON.parse(vaultBlob) as EncryptedBlob
+  if (!parsed.salt) {
+    throw new Error('Missing vault salt.')
+  }
   const salt = base64ToBytes(parsed.salt)
   const iv = base64ToBytes(parsed.iv)
   const data = base64ToBytes(parsed.data)
@@ -88,10 +155,59 @@ async function decryptVault(masterPassword: string, vaultBlob: string): Promise<
   return JSON.parse(decoder.decode(decrypted))
 }
 
+async function wrapMasterPassword(secret: Uint8Array, masterPassword: string): Promise<EncryptedBlob> {
+  const encoder = new TextEncoder()
+  const key = await deriveBiometricWrappingKey(secret)
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoder.encode(masterPassword))
+
+  return {
+    iv: bytesToBase64(iv),
+    data: bytesToBase64(new Uint8Array(encrypted)),
+    version: 1,
+  }
+}
+
+async function unwrapMasterPassword(secret: Uint8Array, wrapped: EncryptedBlob): Promise<string> {
+  const key = await deriveBiometricWrappingKey(secret)
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: bytesToBuffer(base64ToBytes(wrapped.iv)) },
+    key,
+    bytesToBuffer(base64ToBytes(wrapped.data)),
+  )
+
+  return new TextDecoder().decode(decrypted)
+}
+
+function randomIndex(maxExclusive: number): number {
+  const limit = Math.floor(256 / maxExclusive) * maxExclusive
+  const byte = new Uint8Array(1)
+
+  do {
+    crypto.getRandomValues(byte)
+  } while (byte[0] >= limit)
+
+  return byte[0] % maxExclusive
+}
+
+function shuffleSecure(values: string[]): string[] {
+  const shuffled = [...values]
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = randomIndex(index + 1)
+    ;[shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]]
+  }
+
+  return shuffled
+}
+
 function generatePassword(length: number): string {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%&*?'
-  const bytes = crypto.getRandomValues(new Uint8Array(length))
-  return Array.from(bytes, (byte) => chars[byte % chars.length]).join('')
+  const safeLength = Math.max(length, PASSWORD_GROUPS.length)
+  const chars = PASSWORD_GROUPS.join('')
+  const required = PASSWORD_GROUPS.map((group) => group[randomIndex(group.length)])
+  const remaining = Array.from({ length: safeLength - required.length }, () => chars[randomIndex(chars.length)])
+
+  return shuffleSecure([...required, ...remaining]).join('')
 }
 
 function normalizeHeader(value: string): string {
@@ -123,17 +239,70 @@ function getPasswordStrength(value: string): { label: string; score: number } {
   return { label: labels[Math.max(0, score - 1)], score }
 }
 
+function getPasswordAge(updatedAt: string): number {
+  return Math.floor((Date.now() - new Date(updatedAt).getTime()) / (1000 * 60 * 60 * 24))
+}
+
+function getFaviconUrl(website: string): string {
+  try {
+    const url = new URL(website.startsWith('http') ? website : `https://${website}`)
+    return `https://www.google.com/s2/favicons?sz=32&domain=${url.hostname}`
+  } catch {
+    return ''
+  }
+}
+
 async function lazyLoadXLSX() {
   const { read, utils } = await import('xlsx')
   return { read, utils }
 }
 
-async function registerWebAuthn(displayName: string): Promise<boolean> {
+function getStoredWebAuthnCredential(): WebAuthnVaultCredential | null {
+  const stored = localStorage.getItem(WEBAUTHN_KEY)
+  if (!stored) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Partial<WebAuthnVaultCredential>
+    if (!parsed.credentialId || !parsed.prfSalt || !parsed.wrappedMasterPassword) {
+      return null
+    }
+    return parsed as WebAuthnVaultCredential
+  } catch {
+    return null
+  }
+}
+
+async function getWebAuthnPrfSecret(credentialId: Uint8Array, prfSalt: Uint8Array): Promise<Uint8Array | null> {
+  const assertion = await navigator.credentials.get?.({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      allowCredentials: [{ id: bytesToBuffer(credentialId), type: 'public-key' }],
+      timeout: 60000,
+      userVerification: 'required',
+      extensions: {
+        prf: {
+          eval: {
+            first: bytesToBuffer(prfSalt),
+          },
+        },
+      },
+    } as PublicKeyCredentialRequestOptions,
+  })
+
+  const results = assertion ? ((assertion as PublicKeyCredential).getClientExtensionResults() as PrfResults) : null
+  const prfSecret = results?.prf?.results?.first
+  return prfSecret ? new Uint8Array(prfSecret) : null
+}
+
+async function registerWebAuthn(displayName: string, masterPassword: string): Promise<boolean> {
   try {
     if (!window.PublicKeyCredential) {
       return false
     }
 
+    const prfSalt = crypto.getRandomValues(new Uint8Array(32))
     const credential = await navigator.credentials.create?.({
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
@@ -147,8 +316,16 @@ async function registerWebAuthn(displayName: string): Promise<boolean> {
         timeout: 60000,
         authenticatorSelection: {
           authenticatorAttachment: 'platform',
-          residentKey: 'preferred',
-          userVerification: 'preferred',
+          residentKey: 'required',
+          userVerification: 'required',
+          requireResidentKey: true,
+        },
+        extensions: {
+          prf: {
+            eval: {
+              first: bytesToBuffer(prfSalt),
+            },
+          },
         },
       } as PublicKeyCredentialCreationOptions,
     })
@@ -157,35 +334,53 @@ async function registerWebAuthn(displayName: string): Promise<boolean> {
       return false
     }
 
-    localStorage.setItem(WEBAUTHN_KEY, JSON.stringify({ registered: true, timestamp: Date.now() }))
+    const credentialId = new Uint8Array((credential as PublicKeyCredential).rawId)
+    const secret = await getWebAuthnPrfSecret(credentialId, prfSalt)
+    if (!secret) {
+      return false
+    }
+
+    const wrappedMasterPassword = await wrapMasterPassword(secret, masterPassword)
+    localStorage.setItem(
+      WEBAUTHN_KEY,
+      JSON.stringify({
+        credentialId: bytesToBase64(credentialId),
+        prfSalt: bytesToBase64(prfSalt),
+        wrappedMasterPassword,
+        timestamp: Date.now(),
+        version: 2,
+      } satisfies WebAuthnVaultCredential),
+    )
     return true
   } catch {
     return false
   }
 }
 
-async function authenticateWebAuthn(): Promise<boolean> {
+async function unlockMasterPasswordWithWebAuthn(): Promise<string | null> {
   try {
     if (!window.PublicKeyCredential) {
-      return false
+      return null
     }
 
-    const assertion = await navigator.credentials.get?.({
-      publicKey: {
-        challenge: crypto.getRandomValues(new Uint8Array(32)),
-        timeout: 60000,
-        userVerification: 'preferred',
-      } as PublicKeyCredentialRequestOptions,
-    })
+    const stored = getStoredWebAuthnCredential()
+    if (!stored) {
+      return null
+    }
 
-    return !!assertion
+    const secret = await getWebAuthnPrfSecret(base64ToBytes(stored.credentialId), base64ToBytes(stored.prfSalt))
+    if (!secret) {
+      return null
+    }
+
+    return await unwrapMasterPassword(secret, stored.wrappedMasterPassword)
   } catch {
-    return false
+    return null
   }
 }
 
 function isWebAuthnAvailable(): boolean {
-  return !!window.PublicKeyCredential && !!localStorage.getItem(WEBAUTHN_KEY)
+  return !!window.PublicKeyCredential && !!getStoredWebAuthnCredential()
 }
 
 const emptyForm = {
@@ -207,7 +402,6 @@ function App() {
   const [isLocked, setIsLocked] = useState(true)
   const [items, setItems] = useState<VaultItem[]>([])
   const [query, setQuery] = useState('')
-  const isPhone = window.matchMedia('(pointer: coarse)').matches
   const [form, setForm] = useState(emptyForm)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [lockMinutes, setLockMinutes] = useState(isPhone ? 3 : 15)
@@ -216,15 +410,41 @@ function App() {
   const [showFormPassword, setShowFormPassword] = useState(false)
   const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({})
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
-  const [webauthnAvailable, setWebauthnAvailable] = useState(false)
+  const [webauthnAvailable, setWebauthnAvailable] = useState(isWebAuthnAvailable)
   const [selectedTags, setSelectedTags] = useState<string[]>([])
+  const [sortOrder, setSortOrder] = useState<SortOrder>('alpha')
+  const [customTagInput, setCustomTagInput] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const backupFileRef = useRef<HTMLInputElement>(null)
   const [hasVault, setHasVault] = useState(() => Boolean(localStorage.getItem(STORAGE_KEY)))
 
-  useEffect(() => {
-    setWebauthnAvailable(isWebAuthnAvailable())
+  // Refs so lockNow can read current form state without being in its dep array
+  const formRef = useRef(emptyForm)
+  const editingIdRef = useRef<string | null>(null)
+  formRef.current = form
+  editingIdRef.current = editingId
+
+  const lockNow = useCallback(() => {
+    setIsLocked(true)
+    setMasterPassword('')
+    setItems([])
+    setForm(emptyForm)
+    setEditingId(null)
+    setQuery('')
+    setVisiblePasswords({})
+    setSelectedTags([])
+    setShowFormPassword(false)
+    setImportStatus('')
   }, [])
+
+  // Used by the Lock Now button — warns if user has unsaved form data
+  const requestLock = useCallback(() => {
+    const hasUnsaved =
+      editingIdRef.current !== null ||
+      Boolean(formRef.current.title || formRef.current.username || formRef.current.password)
+    if (hasUnsaved && !window.confirm('You have unsaved changes. Lock anyway?')) return
+    lockNow()
+  }, [lockNow])
 
   useEffect(() => {
     if (!toast) {
@@ -250,11 +470,11 @@ function App() {
     }
 
     const timeoutMs = lockMinutes * 60 * 1000
-    let timeout = window.setTimeout(() => { setIsLocked(true); setMasterPassword('') }, timeoutMs)
+    let timeout = window.setTimeout(lockNow, timeoutMs)
 
     const resetLockTimer = () => {
       clearTimeout(timeout)
-      timeout = window.setTimeout(() => setIsLocked(true), timeoutMs)
+      timeout = window.setTimeout(lockNow, timeoutMs)
     }
 
     const events = ['mousemove', 'keydown', 'mousedown', 'touchstart', 'scroll']
@@ -264,7 +484,7 @@ function App() {
       clearTimeout(timeout)
       events.forEach((eventName) => window.removeEventListener(eventName, resetLockTimer))
     }
-  }, [isLocked, lockMinutes])
+  }, [isLocked, lockMinutes, lockNow])
 
   const allTags = useMemo(() => {
     const tags = new Set<string>()
@@ -274,7 +494,11 @@ function App() {
 
   const filteredItems = useMemo(() => {
     const q = query.toLowerCase().trim()
-    const sorted = [...items].sort((a, b) => a.title.localeCompare(b.title))
+    const sorted = [...items].sort((a, b) =>
+      sortOrder === 'alpha'
+        ? a.title.localeCompare(b.title)
+        : new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    )
 
     return sorted.filter((item) => {
       const matchesQuery =
@@ -285,17 +509,20 @@ function App() {
 
       return matchesQuery && matchesTags
     })
-  }, [items, query, selectedTags])
+  }, [items, query, selectedTags, sortOrder])
 
   const passwordStrength = useMemo(() => getPasswordStrength(form.password), [form.password])
 
-  const persistItems = async (nextItems: VaultItem[]) => {
-    const blob = await encryptVault(masterPassword, { items: nextItems })
-    localStorage.setItem(STORAGE_KEY, blob)
-    setItems(nextItems)
-  }
+  const persistItems = useCallback(
+    async (nextItems: VaultItem[]) => {
+      const blob = await encryptVault(masterPassword, { items: nextItems })
+      localStorage.setItem(STORAGE_KEY, blob)
+      setItems(nextItems)
+    },
+    [masterPassword],
+  )
 
-  const createVault = async (event: FormEvent) => {
+  const createVault = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (setupPassword.length < 10) {
       setUnlockError('Use at least 10 characters for your master password.')
@@ -310,17 +537,19 @@ function App() {
     localStorage.setItem(STORAGE_KEY, blob)
     setHasVault(true)
     setMasterPassword(setupPassword)
+    setSetupPassword('')
+    setConfirmPassword('')
     setItems([])
     setIsLocked(false)
     setUnlockError('')
   }
 
-  const unlockVault = async (event: FormEvent) => {
+  const unlockVault = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     try {
       const blob = localStorage.getItem(STORAGE_KEY)
       if (!blob) {
-        setUnlockError('No vault found.')
+        setUnlockError('Could not unlock vault.')
         return
       }
       const payload = await decryptVault(masterPassword, blob)
@@ -328,24 +557,26 @@ function App() {
       setIsLocked(false)
       setUnlockError('')
     } catch {
-      setUnlockError('Incorrect master password.')
+      setUnlockError('Could not unlock vault.')
     }
   }
 
   const unlockWithBiometric = async () => {
     try {
-      const success = await authenticateWebAuthn()
-      if (!success) {
+      const unlockedMasterPassword = await unlockMasterPasswordWithWebAuthn()
+      if (!unlockedMasterPassword) {
         setUnlockError('Biometric authentication failed.')
         return
       }
 
       const blob = localStorage.getItem(STORAGE_KEY)
       if (!blob) {
-        setUnlockError('No vault found.')
+        setUnlockError('Could not unlock vault.')
         return
       }
-      setItems((await decryptVault(masterPassword, blob)).items ?? [])
+      const payload = await decryptVault(unlockedMasterPassword, blob)
+      setMasterPassword(unlockedMasterPassword)
+      setItems((payload.items ?? []).map((item) => ({ ...item, tags: item.tags ?? [] })))
       setIsLocked(false)
       setUnlockError('')
       setToast('Unlocked with biometric')
@@ -354,24 +585,23 @@ function App() {
     }
   }
 
-  const lockNow = () => {
-    setIsLocked(true)
-    setMasterPassword('')
-    setItems([])
-    setForm(emptyForm)
-    setEditingId(null)
-    setQuery('')
-    setVisiblePasswords({})
-    setSelectedTags([])
-  }
-
-  const saveEntry = async (event: FormEvent) => {
+  const saveEntry = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!form.title || !form.username || !form.password) {
       return
     }
 
+    if (!editingId) {
+      const duplicate = items.find(
+        (item) =>
+          item.title.toLowerCase() === form.title.toLowerCase() &&
+          item.username.toLowerCase() === form.username.toLowerCase(),
+      )
+      if (duplicate && !window.confirm(`"${form.title}" with this username already exists. Add anyway?`)) return
+    }
+
     const now = new Date().toISOString()
+    const isEditing = Boolean(editingId)
     const nextItems = editingId
       ? items.map((item) => (item.id === editingId ? { ...item, ...form, updatedAt: now } : item))
       : [{ id: crypto.randomUUID(), ...form, updatedAt: now }, ...items]
@@ -379,6 +609,7 @@ function App() {
     await persistItems(nextItems)
     setForm(emptyForm)
     setEditingId(null)
+    setToast(isEditing ? 'Entry updated' : 'Entry saved')
   }
 
   const editEntry = (item: VaultItem) => {
@@ -393,15 +624,18 @@ function App() {
     })
   }
 
-  const deleteEntry = async (id: string) => {
+  const deleteEntry = async (id: string, title: string) => {
+    if (!window.confirm(`Delete "${title}"? This cannot be undone.`)) return
     const nextItems = items.filter((item) => item.id !== id)
     await persistItems(nextItems)
+    setToast('Entry deleted')
   }
 
-  const copyText = async (value: string) => {
+  const copyText = async (value: string, label = 'Copied') => {
     try {
       await navigator.clipboard.writeText(value)
-      setToast('Copied')
+      setToast(`${label} — clears in 30s`)
+      setTimeout(() => navigator.clipboard.writeText('').catch(() => {}), 30_000)
     } catch {
       window.alert('Clipboard access failed. Use a secure HTTPS context.')
     }
@@ -420,6 +654,21 @@ function App() {
       ...current,
       tags: current.tags.includes(tag) ? current.tags.filter((t) => t !== tag) : [...current.tags, tag],
     }))
+  }
+
+  const addCustomTag = () => {
+    const trimmed = customTagInput.trim()
+    if (trimmed && !form.tags.includes(trimmed)) {
+      setForm((current) => ({ ...current, tags: [...current.tags, trimmed] }))
+    }
+    setCustomTagInput('')
+  }
+
+  const handleCustomTagKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      addCustomTag()
+    }
   }
 
   const parseExcelRows = (rows: Record<string, unknown>[]): VaultItem[] => {
@@ -553,16 +802,29 @@ function App() {
       event.target.value = ''
     }
   }
+
   const exportVault = async () => {
     const now = new Date().toISOString().slice(0, 10)
-    const blob = new Blob([JSON.stringify({ items, exportedAt: now }, null, 2)], { type: 'application/json' })
+    const vaultBlob = localStorage.getItem(STORAGE_KEY)
+    if (!vaultBlob) {
+      setImportStatus('No vault data found to export.')
+      return
+    }
+
+    const backup = {
+      encrypted: true,
+      vaultBlob,
+      exportedAt: now,
+      version: 2,
+    }
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `vault-backup-${now}.json`
+    a.download = `vault-encrypted-backup-${now}.json`
     a.click()
     URL.revokeObjectURL(url)
-    setToast('Backup downloaded')
+    setToast('Encrypted backup downloaded')
   }
 
   const handleVaultImport = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -573,14 +835,21 @@ function App() {
 
     try {
       const text = await file.text()
-      const data = JSON.parse(text) as { items: VaultItem[] }
+      const data = JSON.parse(text) as { encrypted?: boolean; vaultBlob?: string }
 
-      if (!Array.isArray(data.items)) {
+      if (!data.encrypted || !data.vaultBlob) {
+        setImportStatus('Invalid backup file. Only encrypted backups exported from this vault are supported.')
+        return
+      }
+
+      const restoredItems = (await decryptVault(masterPassword, data.vaultBlob)).items
+
+      if (!Array.isArray(restoredItems)) {
         setImportStatus('Invalid backup file format.')
         return
       }
 
-      const normalized = data.items.map((item) => ({ ...item, tags: item.tags ?? [] }))
+      const normalized = restoredItems.map((item) => ({ ...item, tags: item.tags ?? [] }))
       const existingByKey = new Map(
         items.map((item) => [
           `${item.title.toLowerCase()}|${item.username.toLowerCase()}|${item.website.toLowerCase()}`,
@@ -598,7 +867,7 @@ function App() {
       setImportStatus(`Restored ${normalized.length} entries.`)
       setToast('Restore complete')
     } catch {
-      setImportStatus('Restore failed: invalid or corrupted backup file.')
+      setImportStatus('Restore failed: invalid, corrupted, or wrong-password backup file.')
     } finally {
       event.target.value = ''
     }
@@ -606,15 +875,15 @@ function App() {
 
   const registerBiometric = async () => {
     try {
-      const success = await registerWebAuthn('Password Vault User')
+      const success = await registerWebAuthn('Password Vault User', masterPassword)
       if (success) {
         setWebauthnAvailable(true)
         setToast('Biometric registered')
       } else {
-        setUnlockError('Biometric registration not available on this device.')
+        setToast('Biometric unlock requires a browser and device that support passkey PRF.')
       }
     } catch {
-      setUnlockError('Biometric registration failed.')
+      setToast('Biometric registration failed.')
     }
   }
 
@@ -662,6 +931,7 @@ function App() {
                   type="password"
                   value={setupPassword}
                   onChange={(event) => setSetupPassword(event.target.value)}
+                  autoComplete="new-password"
                   required
                 />
               </label>
@@ -671,6 +941,7 @@ function App() {
                   type="password"
                   value={confirmPassword}
                   onChange={(event) => setConfirmPassword(event.target.value)}
+                  autoComplete="new-password"
                   required
                 />
               </label>
@@ -685,6 +956,7 @@ function App() {
                   type="password"
                   value={masterPassword}
                   onChange={(event) => setMasterPassword(event.target.value)}
+                  autoComplete="current-password"
                   required
                 />
               </label>
@@ -703,11 +975,23 @@ function App() {
           <section className="card controls">
             <label>
               Search
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Find by title, username, website"
-              />
+              <div className="search-wrap">
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Find by title, username, website"
+                />
+                {query && (
+                  <button
+                    type="button"
+                    className="clear-search"
+                    onClick={() => setQuery('')}
+                    aria-label="Clear search"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
             </label>
             <label>
               Auto-lock
@@ -719,18 +1003,27 @@ function App() {
                 <option value={30}>30 minutes</option>
               </select>
             </label>
-            <button type="button" className="secondary" onClick={openExcelImportPicker}>
-              Import Excel
-            </button>
-            <button type="button" className="secondary" onClick={exportVault}>
-              Export
-            </button>
-            <button type="button" className="secondary" onClick={openVaultImportPicker}>
-              Restore
-            </button>
-            <button type="button" onClick={lockNow} className="secondary">
-              Lock now
-            </button>
+            <label>
+              Sort
+              <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as SortOrder)}>
+                <option value="alpha">A–Z</option>
+                <option value="recent">Recently updated</option>
+              </select>
+            </label>
+            <div className="controls-actions">
+              <button type="button" className="secondary" onClick={openExcelImportPicker}>
+                Import Excel
+              </button>
+              <button type="button" className="secondary" onClick={exportVault}>
+                Export
+              </button>
+              <button type="button" className="secondary" onClick={openVaultImportPicker}>
+                Restore
+              </button>
+              <button type="button" onClick={requestLock} className="secondary">
+                Lock now
+              </button>
+            </div>
             <input
               ref={fileInputRef}
               type="file"
@@ -741,7 +1034,22 @@ function App() {
             <input ref={backupFileRef} type="file" accept=".json" onChange={handleVaultImport} className="hidden" />
           </section>
 
+          <p className="entry-count">
+            {filteredItems.length !== items.length
+              ? `${filteredItems.length} of ${items.length} entries`
+              : `${items.length} ${items.length === 1 ? 'entry' : 'entries'}`}
+          </p>
+
           {importStatus && <p className="import-status">{importStatus}</p>}
+
+          {!webauthnAvailable && (
+            <section className="card biometric-prompt">
+              <p>Speed up future logins with biometric unlock (Face ID / fingerprint / Windows Hello).</p>
+              <button type="button" className="secondary" onClick={registerBiometric}>
+                Set up Biometric Unlock
+              </button>
+            </section>
+          )}
 
           {allTags.length > 0 && (
             <section className="card tags-filter">
@@ -778,6 +1086,7 @@ function App() {
                 <input
                   value={form.username}
                   onChange={(event) => setForm({ ...form, username: event.target.value })}
+                  autoComplete="username"
                   required
                 />
               </label>
@@ -788,6 +1097,7 @@ function App() {
                     type={showFormPassword ? 'text' : 'password'}
                     value={form.password}
                     onChange={(event) => setForm({ ...form, password: event.target.value })}
+                    autoComplete="new-password"
                     required
                   />
                   <button type="button" className="secondary" onClick={() => setShowFormPassword((v) => !v)}>
@@ -822,8 +1132,8 @@ function App() {
                   rows={3}
                 />
               </label>
-              <label>
-                Tags
+              <div>
+                <p className="tag-label-heading">Tags</p>
                 <div className="tag-buttons">
                   {tagOptions.map((tag) => (
                     <button
@@ -836,7 +1146,39 @@ function App() {
                     </button>
                   ))}
                 </div>
-              </label>
+                <div className="custom-tag-input">
+                  <input
+                    value={customTagInput}
+                    onChange={(e) => setCustomTagInput(e.target.value)}
+                    onKeyDown={handleCustomTagKeyDown}
+                    placeholder="Custom tag…"
+                  />
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={addCustomTag}
+                    disabled={!customTagInput.trim()}
+                  >
+                    Add
+                  </button>
+                </div>
+                {form.tags.filter((t) => !tagOptions.includes(t)).length > 0 && (
+                  <div className="tag-buttons" style={{ marginTop: '0.4rem' }}>
+                    {form.tags
+                      .filter((t) => !tagOptions.includes(t))
+                      .map((tag) => (
+                        <button
+                          key={tag}
+                          type="button"
+                          className="tag-button active"
+                          onClick={() => toggleFormTag(tag)}
+                        >
+                          {tag} ×
+                        </button>
+                      ))}
+                  </div>
+                )}
+              </div>
               <div className="inline">
                 <button type="submit">{editingId ? 'Update' : 'Save'}</button>
                 {editingId && (
@@ -859,61 +1201,73 @@ function App() {
             {filteredItems.length === 0 ? (
               <p className="empty">No entries yet.</p>
             ) : (
-              filteredItems.map((item) => (
-                <article key={item.id} className="card item">
-                  <div>
-                    <h3>{item.title}</h3>
-                    <p>{item.username}</p>
-                    {item.website && (
-                      <a href={item.website.startsWith('http') ? item.website : `https://${item.website}`} target="_blank" rel="noreferrer">
-                        {item.website}
-                      </a>
-                    )}
-                    <p className="masked">{visiblePasswords[item.id] ? item.password : '••••••••••••'}</p>
-                    {item.tags.length > 0 && (
-                      <div className="item-tags">
-                        {item.tags.map((tag) => (
-                          <span key={tag} className="tag-label">
-                            {tag}
-                          </span>
-                        ))}
+              filteredItems.map((item) => {
+                const age = getPasswordAge(item.updatedAt)
+                const faviconUrl = item.website ? getFaviconUrl(item.website) : ''
+                return (
+                  <article key={item.id} className="card item">
+                    <div>
+                      <div className="item-title">
+                        {faviconUrl && (
+                          <img
+                            src={faviconUrl}
+                            alt=""
+                            width={16}
+                            height={16}
+                            className="favicon"
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none'
+                            }}
+                          />
+                        )}
+                        <h3>{item.title}</h3>
                       </div>
-                    )}
-                    <p className="updated">Updated {new Date(item.updatedAt).toLocaleString()}</p>
-                  </div>
-                  <div className="inline">
-                    <button type="button" className="secondary" onClick={() => copyText(item.username)}>
-                      Copy Username
-                    </button>
-                    <button type="button" className="secondary" onClick={() => copyText(item.password)}>
-                      Copy Password
-                    </button>
-                    <button type="button" className="secondary" onClick={() => togglePasswordVisibility(item.id)}>
-                      {visiblePasswords[item.id] ? 'Hide' : 'Show'}
-                    </button>
-                  </div>
-                  <div className="inline">
-                    <button type="button" className="secondary" onClick={() => editEntry(item)}>
-                      Edit
-                    </button>
-                    <button type="button" className="danger" onClick={() => deleteEntry(item.id)}>
-                      Delete
-                    </button>
-                  </div>
-                </article>
-              ))
+                      <p>{item.username}</p>
+                      {item.website && (
+                        <a href={item.website.startsWith('http') ? item.website : `https://${item.website}`} target="_blank" rel="noreferrer">
+                          {item.website}
+                        </a>
+                      )}
+                      <p className="masked">{visiblePasswords[item.id] ? item.password : '••••••••••••'}</p>
+                      {age > 180 && (
+                        <p className="age-warning">Password not changed in {age} days</p>
+                      )}
+                      {item.notes && <p className="item-notes">{item.notes}</p>}
+                      {item.tags.length > 0 && (
+                        <div className="item-tags">
+                          {item.tags.map((tag) => (
+                            <span key={tag} className="tag-label">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <p className="updated">Updated {new Date(item.updatedAt).toLocaleString()}</p>
+                    </div>
+                    <div className="inline">
+                      <button type="button" className="secondary" onClick={() => copyText(item.username, 'Username copied')}>
+                        Copy Username
+                      </button>
+                      <button type="button" className="secondary" onClick={() => copyText(item.password, 'Password copied')}>
+                        Copy Password
+                      </button>
+                      <button type="button" className="secondary" onClick={() => togglePasswordVisibility(item.id)}>
+                        {visiblePasswords[item.id] ? 'Hide' : 'Show'}
+                      </button>
+                    </div>
+                    <div className="inline">
+                      <button type="button" className="secondary" onClick={() => editEntry(item)}>
+                        Edit
+                      </button>
+                      <button type="button" className="danger" onClick={() => deleteEntry(item.id, item.title)}>
+                        Delete
+                      </button>
+                    </div>
+                  </article>
+                )
+              })
             )}
           </section>
-
-          {!webauthnAvailable && (
-            <section className="card">
-              <p>
-                <button type="button" className="secondary" onClick={registerBiometric}>
-                  Register Biometric for Faster Unlock
-                </button>
-              </p>
-            </section>
-          )}
         </>
       )}
     </div>
@@ -921,4 +1275,3 @@ function App() {
 }
 
 export default App
-
