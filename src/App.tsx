@@ -54,6 +54,8 @@ type SyncConfig = {
   username: string
 }
 
+type ModalMode = 'view' | 'add' | 'edit' | null
+
 const STORAGE_KEY = 'password_vault_blob_v1'
 const WEBAUTHN_KEY = 'password_vault_webauthn'
 const SYNC_KEY = 'password_vault_sync_v1'
@@ -64,17 +66,14 @@ const PASSWORD_GROUPS = [
   '!@#$%&*?',
 ]
 
-// Evaluated once at module load — safe to keep outside the component
 const isPhone = window.matchMedia('(pointer: coarse)').matches
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
   const chunkSize = 0x8000
-
   for (let index = 0; index < bytes.length; index += chunkSize) {
     binary += String.fromCharCode(...bytes.slice(index, index + chunkSize))
   }
-
   return btoa(binary)
 }
 
@@ -95,14 +94,8 @@ async function deriveKey(masterPassword: string, salt: Uint8Array): Promise<Cryp
     false,
     ['deriveKey'],
   )
-
   return crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: salt as BufferSource,
-      iterations: 250000,
-      hash: 'SHA-256',
-    },
+    { name: 'PBKDF2', salt: salt as BufferSource, iterations: 250000, hash: 'SHA-256' },
     keyMaterial,
     { name: 'AES-GCM', length: 256 },
     false,
@@ -113,7 +106,6 @@ async function deriveKey(masterPassword: string, salt: Uint8Array): Promise<Cryp
 async function deriveBiometricWrappingKey(secret: Uint8Array): Promise<CryptoKey> {
   const encoder = new TextEncoder()
   const keyMaterial = await crypto.subtle.importKey('raw', bytesToBuffer(secret), { name: 'HKDF' }, false, ['deriveKey'])
-
   return crypto.subtle.deriveKey(
     {
       name: 'HKDF',
@@ -135,7 +127,6 @@ async function encryptVault(masterPassword: string, payload: VaultPayload): Prom
   const key = await deriveKey(masterPassword, salt)
   const plaintext = encoder.encode(JSON.stringify(payload))
   const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext)
-
   return JSON.stringify({
     salt: bytesToBase64(salt),
     iv: bytesToBase64(iv),
@@ -146,9 +137,7 @@ async function encryptVault(masterPassword: string, payload: VaultPayload): Prom
 
 async function decryptVault(masterPassword: string, vaultBlob: string): Promise<VaultPayload> {
   const parsed = JSON.parse(vaultBlob) as EncryptedBlob
-  if (!parsed.salt) {
-    throw new Error('Missing vault salt.')
-  }
+  if (!parsed.salt) throw new Error('Missing vault salt.')
   const salt = base64ToBytes(parsed.salt)
   const iv = base64ToBytes(parsed.iv)
   const data = base64ToBytes(parsed.data)
@@ -158,8 +147,7 @@ async function decryptVault(masterPassword: string, vaultBlob: string): Promise<
     key,
     data as BufferSource,
   )
-  const decoder = new TextDecoder()
-  return JSON.parse(decoder.decode(decrypted))
+  return JSON.parse(new TextDecoder().decode(decrypted))
 }
 
 async function wrapMasterPassword(secret: Uint8Array, masterPassword: string): Promise<EncryptedBlob> {
@@ -167,12 +155,7 @@ async function wrapMasterPassword(secret: Uint8Array, masterPassword: string): P
   const key = await deriveBiometricWrappingKey(secret)
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoder.encode(masterPassword))
-
-  return {
-    iv: bytesToBase64(iv),
-    data: bytesToBase64(new Uint8Array(encrypted)),
-    version: 1,
-  }
+  return { iv: bytesToBase64(iv), data: bytesToBase64(new Uint8Array(encrypted)), version: 1 }
 }
 
 async function unwrapMasterPassword(secret: Uint8Array, wrapped: EncryptedBlob): Promise<string> {
@@ -182,29 +165,22 @@ async function unwrapMasterPassword(secret: Uint8Array, wrapped: EncryptedBlob):
     key,
     bytesToBuffer(base64ToBytes(wrapped.data)),
   )
-
   return new TextDecoder().decode(decrypted)
 }
 
 function randomIndex(maxExclusive: number): number {
   const limit = Math.floor(256 / maxExclusive) * maxExclusive
   const byte = new Uint8Array(1)
-
-  do {
-    crypto.getRandomValues(byte)
-  } while (byte[0] >= limit)
-
+  do { crypto.getRandomValues(byte) } while (byte[0] >= limit)
   return byte[0] % maxExclusive
 }
 
 function shuffleSecure(values: string[]): string[] {
   const shuffled = [...values]
-
   for (let index = shuffled.length - 1; index > 0; index -= 1) {
     const swapIndex = randomIndex(index + 1)
     ;[shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]]
   }
-
   return shuffled
 }
 
@@ -213,7 +189,6 @@ function generatePassword(length: number): string {
   const chars = PASSWORD_GROUPS.join('')
   const required = PASSWORD_GROUPS.map((group) => group[randomIndex(group.length)])
   const remaining = Array.from({ length: safeLength - required.length }, () => chars[randomIndex(chars.length)])
-
   return shuffleSecure([...required, ...remaining]).join('')
 }
 
@@ -222,28 +197,19 @@ function normalizeHeader(value: string): string {
 }
 
 function toText(value: unknown): string {
-  if (value === null || value === undefined) {
-    return ''
-  }
-  if (value instanceof Date) {
-    return value.toISOString().slice(0, 10)
-  }
+  if (value === null || value === undefined) return ''
+  if (value instanceof Date) return value.toISOString().slice(0, 10)
   return String(value).trim()
 }
 
 function getPasswordStrength(value: string): { label: string; score: number } {
-  if (!value) {
-    return { label: 'Empty', score: 0 }
-  }
-
+  if (!value) return { label: 'Empty', score: 0 }
   let score = 0
   if (value.length >= 10) score += 1
   if (/[A-Z]/.test(value) && /[a-z]/.test(value)) score += 1
   if (/\d/.test(value)) score += 1
   if (/[^A-Za-z0-9]/.test(value)) score += 1
-
-  const labels = ['Weak', 'Fair', 'Good', 'Strong']
-  return { label: labels[Math.max(0, score - 1)], score }
+  return { label: ['Weak', 'Fair', 'Good', 'Strong'][Math.max(0, score - 1)], score }
 }
 
 function getPasswordAge(updatedAt: string): number {
@@ -266,19 +232,12 @@ async function lazyLoadXLSX() {
 
 function getStoredWebAuthnCredential(): WebAuthnVaultCredential | null {
   const stored = localStorage.getItem(WEBAUTHN_KEY)
-  if (!stored) {
-    return null
-  }
-
+  if (!stored) return null
   try {
     const parsed = JSON.parse(stored) as Partial<WebAuthnVaultCredential>
-    if (!parsed.credentialId || !parsed.prfSalt || !parsed.wrappedMasterPassword) {
-      return null
-    }
+    if (!parsed.credentialId || !parsed.prfSalt || !parsed.wrappedMasterPassword) return null
     return parsed as WebAuthnVaultCredential
-  } catch {
-    return null
-  }
+  } catch { return null }
 }
 
 async function getWebAuthnPrfSecret(credentialId: Uint8Array, prfSalt: Uint8Array): Promise<Uint8Array | null> {
@@ -288,16 +247,9 @@ async function getWebAuthnPrfSecret(credentialId: Uint8Array, prfSalt: Uint8Arra
       allowCredentials: [{ id: bytesToBuffer(credentialId), type: 'public-key' }],
       timeout: 60000,
       userVerification: 'required',
-      extensions: {
-        prf: {
-          eval: {
-            first: bytesToBuffer(prfSalt),
-          },
-        },
-      },
+      extensions: { prf: { eval: { first: bytesToBuffer(prfSalt) } } },
     } as PublicKeyCredentialRequestOptions,
   })
-
   const results = assertion ? ((assertion as PublicKeyCredential).getClientExtensionResults() as PrfResults) : null
   const prfSecret = results?.prf?.results?.first
   return prfSecret ? new Uint8Array(prfSecret) : null
@@ -305,20 +257,13 @@ async function getWebAuthnPrfSecret(credentialId: Uint8Array, prfSalt: Uint8Arra
 
 async function registerWebAuthn(displayName: string, masterPassword: string): Promise<boolean> {
   try {
-    if (!window.PublicKeyCredential) {
-      return false
-    }
-
+    if (!window.PublicKeyCredential) return false
     const prfSalt = crypto.getRandomValues(new Uint8Array(32))
     const credential = await navigator.credentials.create?.({
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
         rp: { name: 'Password Vault' },
-        user: {
-          id: crypto.getRandomValues(new Uint8Array(16)),
-          name: displayName,
-          displayName,
-        },
+        user: { id: crypto.getRandomValues(new Uint8Array(16)), name: displayName, displayName },
         pubKeyCredParams: [{ alg: -7, type: 'public-key' }],
         timeout: 60000,
         authenticatorSelection: {
@@ -327,26 +272,13 @@ async function registerWebAuthn(displayName: string, masterPassword: string): Pr
           userVerification: 'required',
           requireResidentKey: true,
         },
-        extensions: {
-          prf: {
-            eval: {
-              first: bytesToBuffer(prfSalt),
-            },
-          },
-        },
+        extensions: { prf: { eval: { first: bytesToBuffer(prfSalt) } } },
       } as PublicKeyCredentialCreationOptions,
     })
-
-    if (!credential) {
-      return false
-    }
-
+    if (!credential) return false
     const credentialId = new Uint8Array((credential as PublicKeyCredential).rawId)
     const secret = await getWebAuthnPrfSecret(credentialId, prfSalt)
-    if (!secret) {
-      return false
-    }
-
+    if (!secret) return false
     const wrappedMasterPassword = await wrapMasterPassword(secret, masterPassword)
     localStorage.setItem(
       WEBAUTHN_KEY,
@@ -359,31 +291,18 @@ async function registerWebAuthn(displayName: string, masterPassword: string): Pr
       } satisfies WebAuthnVaultCredential),
     )
     return true
-  } catch {
-    return false
-  }
+  } catch { return false }
 }
 
 async function unlockMasterPasswordWithWebAuthn(): Promise<string | null> {
   try {
-    if (!window.PublicKeyCredential) {
-      return null
-    }
-
+    if (!window.PublicKeyCredential) return null
     const stored = getStoredWebAuthnCredential()
-    if (!stored) {
-      return null
-    }
-
+    if (!stored) return null
     const secret = await getWebAuthnPrfSecret(base64ToBytes(stored.credentialId), base64ToBytes(stored.prfSalt))
-    if (!secret) {
-      return null
-    }
-
+    if (!secret) return null
     return await unwrapMasterPassword(secret, stored.wrappedMasterPassword)
-  } catch {
-    return null
-  }
+  } catch { return null }
 }
 
 function isWebAuthnAvailable(): boolean {
@@ -418,9 +337,11 @@ function App() {
   const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({})
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const [webauthnAvailable, setWebauthnAvailable] = useState(isWebAuthnAvailable)
-  const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [sortOrder, setSortOrder] = useState<SortOrder>('alpha')
   const [customTagInput, setCustomTagInput] = useState('')
+  const [selectedCategory, setSelectedCategory] = useState<string>('all')
+  const [modalMode, setModalMode] = useState<ModalMode>(null)
+  const [selectedItem, setSelectedItem] = useState<VaultItem | null>(null)
   const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(() => {
     try {
       const stored = localStorage.getItem(SYNC_KEY)
@@ -440,11 +361,19 @@ function App() {
   const backupFileRef = useRef<HTMLInputElement>(null)
   const [hasVault, setHasVault] = useState(() => Boolean(localStorage.getItem(STORAGE_KEY)))
 
-  // Refs so lockNow can read current form state without being in its dep array
   const formRef = useRef(emptyForm)
   const editingIdRef = useRef<string | null>(null)
   formRef.current = form
   editingIdRef.current = editingId
+
+  const closeModal = useCallback(() => {
+    setModalMode(null)
+    setSelectedItem(null)
+    setEditingId(null)
+    setForm(emptyForm)
+    setShowFormPassword(false)
+    setCustomTagInput('')
+  }, [])
 
   const lockNow = useCallback(() => {
     setIsLocked(true)
@@ -454,10 +383,12 @@ function App() {
     setEditingId(null)
     setQuery('')
     setVisiblePasswords({})
-    setSelectedTags([])
     setShowFormPassword(false)
     setImportStatus('')
     setSyncStatus('idle')
+    setModalMode(null)
+    setSelectedItem(null)
+    setSelectedCategory('all')
   }, [])
 
   const applySyncConfig = (config: SyncConfig) => {
@@ -482,9 +413,7 @@ function App() {
         body: JSON.stringify({ blob }),
       })
       setSyncStatus(res.ok ? 'synced' : 'error')
-    } catch {
-      setSyncStatus('error')
-    }
+    } catch { setSyncStatus('error') }
   }, [])
 
   const syncPushRef = useRef(syncPush)
@@ -500,15 +429,9 @@ function App() {
       const res = await fetch(`${config.workerUrl}/api/vault`, {
         headers: { Authorization: `Bearer ${config.token}` },
       })
-      if (!res.ok) {
-        setSyncStatus('error')
-        return localItems
-      }
+      if (!res.ok) { setSyncStatus('error'); return localItems }
       const { blob: serverBlob } = (await res.json()) as { blob: string | null }
-      if (!serverBlob) {
-        await syncPush(config)
-        return localItems
-      }
+      if (!serverBlob) { await syncPush(config); return localItems }
       const serverPayload = await decryptVault(password, serverBlob)
       const serverItems = (serverPayload.items ?? []).map((i) => ({ ...i, tags: i.tags ?? [] }))
       const byId = new Map(localItems.map((i) => [i.id, i]))
@@ -528,10 +451,7 @@ function App() {
       }
       setSyncStatus('synced')
       return merged
-    } catch {
-      setSyncStatus('error')
-      return localItems
-    }
+    } catch { setSyncStatus('error'); return localItems }
   }, [syncPush])
 
   const handleSyncSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -561,7 +481,6 @@ function App() {
     }
   }
 
-  // Used by the Lock Now button — warns if user has unsaved form data
   const requestLock = useCallback(() => {
     const hasUnsaved =
       editingIdRef.current !== null ||
@@ -571,9 +490,7 @@ function App() {
   }, [lockNow])
 
   useEffect(() => {
-    if (!toast) {
-      return
-    }
+    if (!toast) return
     const timeout = window.setTimeout(() => setToast(''), 1500)
     return () => window.clearTimeout(timeout)
   }, [toast])
@@ -583,38 +500,33 @@ function App() {
       event.preventDefault()
       setInstallPrompt(event as BeforeInstallPromptEvent)
     }
-
     window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt)
     return () => window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt)
   }, [])
 
   useEffect(() => {
-    if (isLocked) {
-      return
-    }
-
+    if (isLocked) return
     const timeoutMs = lockMinutes * 60 * 1000
     let timeout = window.setTimeout(lockNow, timeoutMs)
-
     const resetLockTimer = () => {
       clearTimeout(timeout)
       timeout = window.setTimeout(lockNow, timeoutMs)
     }
-
     const events = ['mousemove', 'keydown', 'mousedown', 'touchstart', 'scroll']
     events.forEach((eventName) => window.addEventListener(eventName, resetLockTimer, { passive: true }))
-
     return () => {
       clearTimeout(timeout)
       events.forEach((eventName) => window.removeEventListener(eventName, resetLockTimer))
     }
   }, [isLocked, lockMinutes, lockNow])
 
-  const allTags = useMemo(() => {
-    const tags = new Set<string>()
-    items.forEach((item) => item.tags.forEach((tag) => tags.add(tag)))
-    return Array.from(tags).sort()
-  }, [items])
+  useEffect(() => {
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape' && modalMode !== null) closeModal()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [modalMode, closeModal])
 
   const filteredItems = useMemo(() => {
     const q = query.toLowerCase().trim()
@@ -623,17 +535,23 @@ function App() {
         ? a.title.localeCompare(b.title)
         : new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
     )
-
     return sorted.filter((item) => {
       const matchesQuery =
-        !q ||
-        [item.title, item.username, item.website, item.notes].some((field) => field.toLowerCase().includes(q))
-
-      const matchesTags = selectedTags.length === 0 || selectedTags.some((tag) => item.tags.includes(tag))
-
-      return matchesQuery && matchesTags
+        !q || [item.title, item.username, item.website, item.notes].some((f) => f.toLowerCase().includes(q))
+      const matchesCategory = selectedCategory === 'all' || item.tags.includes(selectedCategory)
+      return matchesQuery && matchesCategory
     })
-  }, [items, query, selectedTags, sortOrder])
+  }, [items, query, selectedCategory, sortOrder])
+
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const item of items) {
+      for (const tag of item.tags) {
+        counts[tag] = (counts[tag] ?? 0) + 1
+      }
+    }
+    return counts
+  }, [items])
 
   const passwordStrength = useMemo(() => getPasswordStrength(form.password), [form.password])
 
@@ -650,15 +568,8 @@ function App() {
 
   const createVault = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (setupPassword.length < 10) {
-      setUnlockError('Use at least 10 characters for your master password.')
-      return
-    }
-    if (setupPassword !== confirmPassword) {
-      setUnlockError('Passwords do not match.')
-      return
-    }
-
+    if (setupPassword.length < 10) { setUnlockError('Use at least 10 characters for your master password.'); return }
+    if (setupPassword !== confirmPassword) { setUnlockError('Passwords do not match.'); return }
     const blob = await encryptVault(setupPassword, { items: [] })
     localStorage.setItem(STORAGE_KEY, blob)
     setHasVault(true)
@@ -686,24 +597,15 @@ function App() {
           if (merged !== localItems) setItems(merged)
         })
       }
-    } catch {
-      setUnlockError('Could not unlock vault.')
-    }
+    } catch { setUnlockError('Could not unlock vault.') }
   }
 
   const unlockWithBiometric = async () => {
     try {
       const unlockedMasterPassword = await unlockMasterPasswordWithWebAuthn()
-      if (!unlockedMasterPassword) {
-        setUnlockError('Biometric authentication failed.')
-        return
-      }
-
+      if (!unlockedMasterPassword) { setUnlockError('Biometric authentication failed.'); return }
       const blob = localStorage.getItem(STORAGE_KEY)
-      if (!blob) {
-        setUnlockError('Could not unlock vault.')
-        return
-      }
+      if (!blob) { setUnlockError('Could not unlock vault.'); return }
       const payload = await decryptVault(unlockedMasterPassword, blob)
       const localItems = (payload.items ?? []).map((item) => ({ ...item, tags: item.tags ?? [] }))
       setMasterPassword(unlockedMasterPassword)
@@ -717,17 +619,12 @@ function App() {
           if (merged !== localItems) setItems(merged)
         })
       }
-    } catch {
-      setUnlockError('Biometric authentication failed.')
-    }
+    } catch { setUnlockError('Biometric authentication failed.') }
   }
 
   const saveEntry = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!form.title || !form.username || !form.password) {
-      return
-    }
-
+    if (!form.title || !form.username || !form.password) return
     if (!editingId) {
       const duplicate = items.find(
         (item) =>
@@ -736,20 +633,31 @@ function App() {
       )
       if (duplicate && !window.confirm(`"${form.title}" with this username already exists. Add anyway?`)) return
     }
-
     const now = new Date().toISOString()
     const isEditing = Boolean(editingId)
     const nextItems = editingId
       ? items.map((item) => (item.id === editingId ? { ...item, ...form, updatedAt: now } : item))
       : [{ id: crypto.randomUUID(), ...form, updatedAt: now }, ...items]
-
     await persistItems(nextItems)
-    setForm(emptyForm)
-    setEditingId(null)
+    closeModal()
     setToast(isEditing ? 'Entry updated' : 'Entry saved')
   }
 
-  const editEntry = (item: VaultItem) => {
+  const openAddForm = () => {
+    setForm(emptyForm)
+    setEditingId(null)
+    setShowFormPassword(false)
+    setCustomTagInput('')
+    setModalMode('add')
+  }
+
+  const openItemDetail = (item: VaultItem) => {
+    setSelectedItem(item)
+    setModalMode('view')
+  }
+
+  const startEditEntry = (item: VaultItem) => {
+    setSelectedItem(item)
     setEditingId(item.id)
     setForm({
       title: item.title,
@@ -759,12 +667,16 @@ function App() {
       notes: item.notes,
       tags: [...item.tags],
     })
+    setShowFormPassword(false)
+    setCustomTagInput('')
+    setModalMode('edit')
   }
 
   const deleteEntry = async (id: string, title: string) => {
     if (!window.confirm(`Delete "${title}"? This cannot be undone.`)) return
     const nextItems = items.filter((item) => item.id !== id)
     await persistItems(nextItems)
+    closeModal()
     setToast('Entry deleted')
   }
 
@@ -773,17 +685,11 @@ function App() {
       await navigator.clipboard.writeText(value)
       setToast(`${label} — clears in 30s`)
       setTimeout(() => navigator.clipboard.writeText('').catch(() => {}), 30_000)
-    } catch {
-      window.alert('Clipboard access failed. Use a secure HTTPS context.')
-    }
+    } catch { window.alert('Clipboard access failed. Use a secure HTTPS context.') }
   }
 
   const togglePasswordVisibility = (id: string) => {
     setVisiblePasswords((current) => ({ ...current, [id]: !current[id] }))
-  }
-
-  const toggleTag = (tag: string) => {
-    setSelectedTags((current) => (current.includes(tag) ? current.filter((t) => t !== tag) : [...current, tag]))
   }
 
   const toggleFormTag = (tag: string) => {
@@ -802,22 +708,17 @@ function App() {
   }
 
   const handleCustomTagKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      addCustomTag()
-    }
+    if (e.key === 'Enter') { e.preventDefault(); addCustomTag() }
   }
 
   const parseExcelRows = (rows: Record<string, unknown>[]): VaultItem[] => {
     const now = new Date().toISOString()
-
     return rows
       .map((row) => {
         const normalized = new Map<string, string>()
         for (const [key, value] of Object.entries(row)) {
           normalized.set(normalizeHeader(key), toText(value))
         }
-
         const company = normalized.get('company') ?? normalized.get('title') ?? ''
         const account = normalized.get('account') ?? ''
         const service = normalized.get('service') ?? normalized.get('website') ?? normalized.get('site') ?? ''
@@ -828,10 +729,8 @@ function App() {
         const payment = normalized.get('payment') ?? ''
         const balance = normalized.get('balance') ?? ''
         const notes = normalized.get('notes') ?? ''
-
         const title = company || service || account || 'Imported Entry'
         const website = service
-
         const noteParts = [
           notes && `Notes: ${notes}`,
           account && `Account: ${account}`,
@@ -840,7 +739,6 @@ function App() {
           payment && `Payment: ${payment}`,
           balance && `Balance: ${balance}`,
         ].filter(Boolean)
-
         return {
           id: crypto.randomUUID(),
           title,
@@ -857,103 +755,63 @@ function App() {
 
   const handleExcelImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
-    if (!file) {
-      return
-    }
-
+    if (!file) return
     try {
       const { read, utils } = await lazyLoadXLSX()
       const buffer = await file.arrayBuffer()
       const workbook = read(buffer)
       const importedAllSheets: VaultItem[] = []
-
       const detectHeaderRow = (grid: unknown[][]): number => {
         for (let rowIndex = 0; rowIndex < Math.min(grid.length, 20); rowIndex += 1) {
           const cells = (grid[rowIndex] ?? []).map((cell) => normalizeHeader(toText(cell)))
           const hasPassword = cells.includes('password') || cells.includes('passcode') || cells.includes('pwd')
           const hasIdentity =
-            cells.includes('username') ||
-            cells.includes('user') ||
-            cells.includes('login') ||
-            cells.includes('email') ||
-            cells.includes('company') ||
-            cells.includes('account') ||
-            cells.includes('service')
-
-          if (hasPassword && hasIdentity) {
-            return rowIndex
-          }
+            cells.includes('username') || cells.includes('user') || cells.includes('login') ||
+            cells.includes('email') || cells.includes('company') || cells.includes('account') || cells.includes('service')
+          if (hasPassword && hasIdentity) return rowIndex
         }
         return -1
       }
-
       for (const sheetName of workbook.SheetNames) {
         const sheet = workbook.Sheets[sheetName]
         const grid = utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' }) as unknown[][]
         const headerRowIndex = detectHeaderRow(grid)
-        if (headerRowIndex < 0) {
-          continue
-        }
-
+        if (headerRowIndex < 0) continue
         const headers = (grid[headerRowIndex] ?? []).map((cell) => toText(cell))
         const rowObjects = grid
           .slice(headerRowIndex + 1)
           .filter((row) => row.some((cell) => toText(cell) !== ''))
           .map((row) => {
             const rowObject: Record<string, unknown> = {}
-            headers.forEach((header, index) => {
-              if (header) {
-                rowObject[header] = row[index] ?? ''
-              }
-            })
+            headers.forEach((header, index) => { if (header) rowObject[header] = row[index] ?? '' })
             return rowObject
           })
-
         importedAllSheets.push(...parseExcelRows(rowObjects))
       }
-
       if (importedAllSheets.length === 0) {
         setImportStatus('No rows with password data were found. Check that a sheet has Password and Username columns.')
         return
       }
-
       const existingByKey = new Map(
-        items.map((item) => [
-          `${item.title.toLowerCase()}|${item.username.toLowerCase()}|${item.website.toLowerCase()}`,
-          item,
-        ]),
+        items.map((item) => [`${item.title.toLowerCase()}|${item.username.toLowerCase()}|${item.website.toLowerCase()}`, item]),
       )
-
       for (const importedItem of importedAllSheets) {
         const key = `${importedItem.title.toLowerCase()}|${importedItem.username.toLowerCase()}|${importedItem.website.toLowerCase()}`
         existingByKey.set(key, importedItem)
       }
-
       const merged = Array.from(existingByKey.values())
       await persistItems(merged)
       setImportStatus(`Imported ${importedAllSheets.length} entries from ${file.name}.`)
       setToast('Import complete')
-    } catch {
-      setImportStatus('Import failed: unsupported or corrupted file.')
-    } finally {
-      event.target.value = ''
-    }
+    } catch { setImportStatus('Import failed: unsupported or corrupted file.') }
+    finally { event.target.value = '' }
   }
 
   const exportVault = async () => {
     const now = new Date().toISOString().slice(0, 10)
     const vaultBlob = localStorage.getItem(STORAGE_KEY)
-    if (!vaultBlob) {
-      setImportStatus('No vault data found to export.')
-      return
-    }
-
-    const backup = {
-      encrypted: true,
-      vaultBlob,
-      exportedAt: now,
-      version: 2,
-    }
+    if (!vaultBlob) { setImportStatus('No vault data found to export.'); return }
+    const backup = { encrypted: true, vaultBlob, exportedAt: now, version: 2 }
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -966,500 +824,421 @@ function App() {
 
   const handleVaultImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
-    if (!file) {
-      return
-    }
-
+    if (!file) return
     try {
       const text = await file.text()
       const data = JSON.parse(text) as { encrypted?: boolean; vaultBlob?: string }
-
       if (!data.encrypted || !data.vaultBlob) {
         setImportStatus('Invalid backup file. Only encrypted backups exported from this vault are supported.')
         return
       }
-
       const restoredItems = (await decryptVault(masterPassword, data.vaultBlob)).items
-
-      if (!Array.isArray(restoredItems)) {
-        setImportStatus('Invalid backup file format.')
-        return
-      }
-
+      if (!Array.isArray(restoredItems)) { setImportStatus('Invalid backup file format.'); return }
       const normalized = restoredItems.map((item) => ({ ...item, tags: item.tags ?? [] }))
       const existingByKey = new Map(
-        items.map((item) => [
-          `${item.title.toLowerCase()}|${item.username.toLowerCase()}|${item.website.toLowerCase()}`,
-          item,
-        ]),
+        items.map((item) => [`${item.title.toLowerCase()}|${item.username.toLowerCase()}|${item.website.toLowerCase()}`, item]),
       )
-
       for (const importedItem of normalized) {
         const key = `${importedItem.title.toLowerCase()}|${importedItem.username.toLowerCase()}|${importedItem.website.toLowerCase()}`
         existingByKey.set(key, importedItem)
       }
-
       const merged = Array.from(existingByKey.values())
       await persistItems(merged)
       setImportStatus(`Restored ${normalized.length} entries.`)
       setToast('Restore complete')
-    } catch {
-      setImportStatus('Restore failed: invalid, corrupted, or wrong-password backup file.')
-    } finally {
-      event.target.value = ''
-    }
+    } catch { setImportStatus('Restore failed: invalid, corrupted, or wrong-password backup file.') }
+    finally { event.target.value = '' }
   }
 
   const registerBiometric = async () => {
     try {
       const success = await registerWebAuthn('Password Vault User', masterPassword)
-      if (success) {
-        setWebauthnAvailable(true)
-        setToast('Biometric registered')
-      } else {
-        setToast('Biometric unlock requires a browser and device that support passkey PRF.')
-      }
-    } catch {
-      setToast('Biometric registration failed.')
-    }
+      if (success) { setWebauthnAvailable(true); setToast('Biometric registered') }
+      else setToast('Biometric unlock requires a browser and device that support passkey PRF.')
+    } catch { setToast('Biometric registration failed.') }
   }
 
-  const openExcelImportPicker = () => {
-    fileInputRef.current?.click()
-  }
-
-  const openVaultImportPicker = () => {
-    backupFileRef.current?.click()
-  }
+  const openExcelImportPicker = () => fileInputRef.current?.click()
 
   const installApp = async () => {
-    if (!installPrompt) {
-      return
-    }
+    if (!installPrompt) return
     await installPrompt.prompt()
     await installPrompt.userChoice
     setInstallPrompt(null)
   }
 
+  const entryForm = (
+    <form onSubmit={saveEntry} className="stack">
+      <h2>{modalMode === 'edit' ? 'Edit Entry' : 'Add Entry'}</h2>
+      <label>
+        Title
+        <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="Example: Gmail" required />
+      </label>
+      <label>
+        Username
+        <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} autoComplete="username" required />
+      </label>
+      <label>
+        Password
+        <div className="inline">
+          <input
+            type={showFormPassword ? 'text' : 'password'}
+            value={form.password}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+            autoComplete="new-password"
+            required
+          />
+          <button type="button" className="secondary" onClick={() => setShowFormPassword((v) => !v)}>
+            {showFormPassword ? 'Hide' : 'Show'}
+          </button>
+          <button type="button" className="secondary" onClick={() => setForm({ ...form, password: generatePassword(20) })}>
+            Generate
+          </button>
+        </div>
+      </label>
+      <div className="strength">
+        <div className={`strength-bar score-${passwordStrength.score}`} />
+        <p>Strength: {passwordStrength.label}</p>
+      </div>
+      <label>
+        Website
+        <input value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} placeholder="https://" />
+      </label>
+      <label>
+        Notes
+        <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} />
+      </label>
+      <div>
+        <p className="tag-label-heading">Tags</p>
+        <div className="tag-buttons">
+          {tagOptions.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              className={`tag-button ${form.tags.includes(tag) ? 'active' : ''}`}
+              onClick={() => toggleFormTag(tag)}
+            >
+              {tag}
+            </button>
+          ))}
+        </div>
+        <div className="custom-tag-input">
+          <input
+            value={customTagInput}
+            onChange={(e) => setCustomTagInput(e.target.value)}
+            onKeyDown={handleCustomTagKeyDown}
+            placeholder="Custom tag…"
+          />
+          <button type="button" className="secondary" onClick={addCustomTag} disabled={!customTagInput.trim()}>
+            Add
+          </button>
+        </div>
+        {form.tags.filter((t) => !tagOptions.includes(t)).length > 0 && (
+          <div className="tag-buttons" style={{ marginTop: '0.4rem' }}>
+            {form.tags.filter((t) => !tagOptions.includes(t)).map((tag) => (
+              <button key={tag} type="button" className="tag-button active" onClick={() => toggleFormTag(tag)}>
+                {tag} ×
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="inline">
+        <button type="submit">{modalMode === 'edit' ? 'Update' : 'Save'}</button>
+        <button type="button" className="secondary" onClick={closeModal}>Cancel</button>
+      </div>
+    </form>
+  )
+
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <div>
-          <h1>Password Vault</h1>
-          <p>Encrypted local vault for your phone and desktop browser.</p>
-        </div>
-        {!isLocked && installPrompt && (
-          <button type="button" className="install" onClick={installApp}>
-            Install App
-          </button>
-        )}
-      </header>
-
       {toast && <p className="toast">{toast}</p>}
 
       {isLocked ? (
-        <section className="card">
-          {!hasVault ? (
-            <form onSubmit={createVault} className="stack">
-              <h2>Create your vault</h2>
-              <label>
-                Master password
-                <input
-                  type="password"
-                  value={setupPassword}
-                  onChange={(event) => setSetupPassword(event.target.value)}
-                  autoComplete="new-password"
-                  required
-                />
-              </label>
-              <label>
-                Confirm password
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(event) => setConfirmPassword(event.target.value)}
-                  autoComplete="new-password"
-                  required
-                />
-              </label>
-              <button type="submit">Create Vault</button>
-            </form>
-          ) : (
-            <form onSubmit={unlockVault} className="stack">
-              <h2>Unlock vault</h2>
-              <label>
-                Master password
-                <input
-                  type="password"
-                  value={masterPassword}
-                  onChange={(event) => setMasterPassword(event.target.value)}
-                  autoComplete="current-password"
-                  required
-                />
-              </label>
-              <button type="submit">Unlock</button>
-              {webauthnAvailable && (
-                <button type="button" className="secondary" onClick={unlockWithBiometric}>
-                  Unlock with Biometric
-                </button>
-              )}
-            </form>
-          )}
-          {unlockError && <p className="error">{unlockError}</p>}
-        </section>
+        <div className="lock-screen">
+          <div className="card lock-card">
+            <div className="lock-brand">
+              <h1>Password Vault</h1>
+              <p>Encrypted local vault for your phone and desktop browser.</p>
+            </div>
+            {!hasVault ? (
+              <form onSubmit={createVault} className="stack">
+                <h2>Create your vault</h2>
+                <label>
+                  Master password
+                  <input type="password" value={setupPassword} onChange={(e) => setSetupPassword(e.target.value)} autoComplete="new-password" required />
+                </label>
+                <label>
+                  Confirm password
+                  <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} autoComplete="new-password" required />
+                </label>
+                <button type="submit">Create Vault</button>
+              </form>
+            ) : (
+              <form onSubmit={unlockVault} className="stack">
+                <h2>Unlock vault</h2>
+                <label>
+                  Master password
+                  <input type="password" value={masterPassword} onChange={(e) => setMasterPassword(e.target.value)} autoComplete="current-password" required />
+                </label>
+                <button type="submit">Unlock</button>
+                {webauthnAvailable && (
+                  <button type="button" className="secondary" onClick={unlockWithBiometric}>
+                    Unlock with Biometric
+                  </button>
+                )}
+              </form>
+            )}
+            {unlockError && <p className="error">{unlockError}</p>}
+          </div>
+        </div>
       ) : (
-        <>
-          <section className="card controls">
-            <label>
-              Search
+        <div className="vault-layout">
+          {/* Sidebar */}
+          <aside className="sidebar">
+            <div className="sidebar-brand">
+              <h1>Password Vault</h1>
+              {installPrompt && (
+                <button type="button" className="secondary small" onClick={installApp}>Install</button>
+              )}
+            </div>
+
+            <nav className="sidebar-nav">
+              <button
+                type="button"
+                className={`nav-item ${selectedCategory === 'all' ? 'active' : ''}`}
+                onClick={() => setSelectedCategory('all')}
+              >
+                <span>All Items</span>
+                <span className="nav-count">{items.length}</span>
+              </button>
+              {tagOptions.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  className={`nav-item ${selectedCategory === tag ? 'active' : ''}`}
+                  onClick={() => setSelectedCategory(tag)}
+                >
+                  <span>{tag}</span>
+                  {categoryCounts[tag] ? <span className="nav-count">{categoryCounts[tag]}</span> : null}
+                </button>
+              ))}
+            </nav>
+
+            <div className="sidebar-footer">
+              <div className="sync-bar">
+                {syncConfig ? (
+                  <div className="sync-info">
+                    <span className={`sync-dot sync-dot--${syncStatus}`} />
+                    <span className="sync-user">{syncConfig.username}</span>
+                    <button type="button" className="secondary small" onClick={() => syncPushRef.current(syncConfig)}>Sync</button>
+                    <button type="button" className="secondary small danger-text" onClick={removeSyncConfig}>Disconnect</button>
+                  </div>
+                ) : (
+                  <button type="button" className="secondary small full-width" onClick={() => setSyncOpen((v) => !v)}>
+                    {syncOpen ? 'Cancel Sync Setup' : 'Enable Cloud Sync'}
+                  </button>
+                )}
+              </div>
+              <div className="sidebar-actions">
+                {!webauthnAvailable && (
+                  <button type="button" className="secondary small" onClick={registerBiometric}>Set up Biometric</button>
+                )}
+                <button type="button" className="secondary small" onClick={openExcelImportPicker}>Import Excel</button>
+                <button type="button" className="secondary small" onClick={exportVault}>Export</button>
+                <button type="button" className="secondary small" onClick={() => backupFileRef.current?.click()}>Restore</button>
+                <button type="button" className="secondary small" onClick={requestLock}>Lock now</button>
+              </div>
+            </div>
+
+            <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleExcelImport} className="hidden" />
+            <input ref={backupFileRef} type="file" accept=".json" onChange={handleVaultImport} className="hidden" />
+          </aside>
+
+          {/* Main panel */}
+          <div className="main-panel">
+            <header className="top-bar">
               <div className="search-wrap">
                 <input
                   value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Find by title, username, website"
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search entries…"
                 />
                 {query && (
-                  <button
-                    type="button"
-                    className="clear-search"
-                    onClick={() => setQuery('')}
-                    aria-label="Clear search"
-                  >
-                    ×
-                  </button>
+                  <button type="button" className="clear-search" onClick={() => setQuery('')} aria-label="Clear search">×</button>
                 )}
               </div>
-            </label>
-            <label>
-              Auto-lock
-              <select value={lockMinutes} onChange={(event) => setLockMinutes(Number(event.target.value))}>
-                <option value={1}>1 minute</option>
-                <option value={3}>3 minutes</option>
-                <option value={5}>5 minutes</option>
-                <option value={15}>15 minutes</option>
-                <option value={30}>30 minutes</option>
-              </select>
-            </label>
-            <label>
-              Sort
-              <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as SortOrder)}>
+              <select value={sortOrder} onChange={(e) => setSortOrder(e.target.value as SortOrder)} className="bar-select">
                 <option value="alpha">A–Z</option>
-                <option value="recent">Recently updated</option>
+                <option value="recent">Recent</option>
               </select>
-            </label>
-            <div className="controls-actions">
-              <button type="button" className="secondary" onClick={openExcelImportPicker}>
-                Import Excel
-              </button>
-              <button type="button" className="secondary" onClick={exportVault}>
-                Export
-              </button>
-              <button type="button" className="secondary" onClick={openVaultImportPicker}>
-                Restore
-              </button>
-              <button type="button" onClick={requestLock} className="secondary">
-                Lock now
-              </button>
-            </div>
-            <div className="sync-bar">
-              {syncConfig ? (
-                <div className="sync-info">
-                  <span className={`sync-dot sync-dot--${syncStatus}`} />
-                  <span className="sync-user">{syncConfig.username}</span>
-                  <button type="button" className="secondary small" onClick={() => syncPushRef.current(syncConfig)}>
-                    Sync now
-                  </button>
-                  <button type="button" className="secondary small danger-text" onClick={removeSyncConfig}>
-                    Disconnect
-                  </button>
-                </div>
-              ) : (
-                <button type="button" className="secondary" onClick={() => setSyncOpen((v) => !v)}>
-                  Enable Cloud Sync
-                </button>
+              <select value={lockMinutes} onChange={(e) => setLockMinutes(Number(e.target.value))} className="bar-select">
+                <option value={1}>1 min</option>
+                <option value={3}>3 min</option>
+                <option value={5}>5 min</option>
+                <option value={15}>15 min</option>
+                <option value={30}>30 min</option>
+              </select>
+              <button type="button" className="add-btn" onClick={openAddForm}>+ Add</button>
+            </header>
+
+            <div className="main-content">
+              {importStatus && <p className="import-status">{importStatus}</p>}
+
+              <p className="entry-count">
+                {filteredItems.length !== items.length
+                  ? `${filteredItems.length} of ${items.length} entries`
+                  : `${items.length} ${items.length === 1 ? 'entry' : 'entries'}`}
+              </p>
+
+              {syncOpen && (
+                <section className="card sync-panel">
+                  <form onSubmit={handleSyncSubmit} className="stack">
+                    <h2>Cloud Sync Setup</h2>
+                    <p className="sync-note">Your vault is encrypted before it ever leaves your device.</p>
+                    <div className="inline">
+                      <button type="button" className={syncIsRegistering ? '' : 'secondary'} onClick={() => setSyncIsRegistering(true)}>New account</button>
+                      <button type="button" className={!syncIsRegistering ? '' : 'secondary'} onClick={() => setSyncIsRegistering(false)}>Existing account</button>
+                    </div>
+                    <label>
+                      Worker URL
+                      <input value={syncFormUrl} onChange={(e) => setSyncFormUrl(e.target.value)} placeholder="https://your-worker.workers.dev" required />
+                    </label>
+                    <label>
+                      Username
+                      <input value={syncFormUsername} onChange={(e) => setSyncFormUsername(e.target.value)} autoComplete="username" required />
+                    </label>
+                    <label>
+                      Sync password
+                      <input type="password" value={syncFormPassword} onChange={(e) => setSyncFormPassword(e.target.value)} autoComplete="new-password" required />
+                    </label>
+                    {syncError && <p className="error">{syncError}</p>}
+                    <div className="inline">
+                      <button type="submit">{syncIsRegistering ? 'Create & connect' : 'Connect'}</button>
+                      <button type="button" className="secondary" onClick={() => { setSyncOpen(false); setSyncError('') }}>Cancel</button>
+                    </div>
+                  </form>
+                </section>
               )}
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              onChange={handleExcelImport}
-              className="hidden"
-            />
-            <input ref={backupFileRef} type="file" accept=".json" onChange={handleVaultImport} className="hidden" />
-          </section>
 
-          <p className="entry-count">
-            {filteredItems.length !== items.length
-              ? `${filteredItems.length} of ${items.length} entries`
-              : `${items.length} ${items.length === 1 ? 'entry' : 'entries'}`}
-          </p>
-
-          {importStatus && <p className="import-status">{importStatus}</p>}
-
-          {!webauthnAvailable && (
-            <section className="card biometric-prompt">
-              <p>Speed up future logins with biometric unlock (Face ID / fingerprint / Windows Hello).</p>
-              <button type="button" className="secondary" onClick={registerBiometric}>
-                Set up Biometric Unlock
-              </button>
-            </section>
-          )}
-
-          {allTags.length > 0 && (
-            <section className="card tags-filter">
-              <p>Filter by tags:</p>
-              <div className="tag-buttons">
-                {allTags.map((tag) => (
-                  <button
-                    key={tag}
-                    type="button"
-                    className={`tag-button ${selectedTags.includes(tag) ? 'active' : ''}`}
-                    onClick={() => toggleTag(tag)}
-                  >
-                    {tag}
-                  </button>
-                ))}
-              </div>
-            </section>
-          )}
-
-          <section className="card">
-            <form onSubmit={saveEntry} className="stack">
-              <h2>{editingId ? 'Edit Entry' : 'Add Entry'}</h2>
-              <label>
-                Title
-                <input
-                  value={form.title}
-                  onChange={(event) => setForm({ ...form, title: event.target.value })}
-                  placeholder="Example: Gmail"
-                  required
-                />
-              </label>
-              <label>
-                Username
-                <input
-                  value={form.username}
-                  onChange={(event) => setForm({ ...form, username: event.target.value })}
-                  autoComplete="username"
-                  required
-                />
-              </label>
-              <label>
-                Password
-                <div className="inline">
-                  <input
-                    type={showFormPassword ? 'text' : 'password'}
-                    value={form.password}
-                    onChange={(event) => setForm({ ...form, password: event.target.value })}
-                    autoComplete="new-password"
-                    required
-                  />
-                  <button type="button" className="secondary" onClick={() => setShowFormPassword((v) => !v)}>
-                    {showFormPassword ? 'Hide' : 'Show'}
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => setForm({ ...form, password: generatePassword(20) })}
-                  >
-                    Generate
-                  </button>
-                </div>
-              </label>
-              <div className="strength">
-                <div className={`strength-bar score-${passwordStrength.score}`} />
-                <p>Password strength: {passwordStrength.label}</p>
-              </div>
-              <label>
-                Website
-                <input
-                  value={form.website}
-                  onChange={(event) => setForm({ ...form, website: event.target.value })}
-                  placeholder="https://"
-                />
-              </label>
-              <label>
-                Notes
-                <textarea
-                  value={form.notes}
-                  onChange={(event) => setForm({ ...form, notes: event.target.value })}
-                  rows={3}
-                />
-              </label>
-              <div>
-                <p className="tag-label-heading">Tags</p>
-                <div className="tag-buttons">
-                  {tagOptions.map((tag) => (
-                    <button
-                      key={tag}
-                      type="button"
-                      className={`tag-button ${form.tags.includes(tag) ? 'active' : ''}`}
-                      onClick={() => toggleFormTag(tag)}
-                    >
-                      {tag}
-                    </button>
-                  ))}
-                </div>
-                <div className="custom-tag-input">
-                  <input
-                    value={customTagInput}
-                    onChange={(e) => setCustomTagInput(e.target.value)}
-                    onKeyDown={handleCustomTagKeyDown}
-                    placeholder="Custom tag…"
-                  />
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={addCustomTag}
-                    disabled={!customTagInput.trim()}
-                  >
-                    Add
-                  </button>
-                </div>
-                {form.tags.filter((t) => !tagOptions.includes(t)).length > 0 && (
-                  <div className="tag-buttons" style={{ marginTop: '0.4rem' }}>
-                    {form.tags
-                      .filter((t) => !tagOptions.includes(t))
-                      .map((tag) => (
-                        <button
-                          key={tag}
-                          type="button"
-                          className="tag-button active"
-                          onClick={() => toggleFormTag(tag)}
-                        >
-                          {tag} ×
-                        </button>
-                      ))}
-                  </div>
-                )}
-              </div>
-              <div className="inline">
-                <button type="submit">{editingId ? 'Update' : 'Save'}</button>
-                {editingId && (
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => {
-                      setEditingId(null)
-                      setForm(emptyForm)
-                    }}
-                  >
-                    Cancel
-                  </button>
-                )}
-              </div>
-            </form>
-          </section>
-
-          {syncOpen && (
-            <section className="card">
-              <form onSubmit={handleSyncSubmit} className="stack">
-                <h2>Cloud Sync Setup</h2>
-                <p className="sync-note">Your vault is encrypted before it ever leaves your device.</p>
-                <div className="inline">
-                  <button type="button" className={syncIsRegistering ? '' : 'secondary'} onClick={() => setSyncIsRegistering(true)}>
-                    New account
-                  </button>
-                  <button type="button" className={!syncIsRegistering ? '' : 'secondary'} onClick={() => setSyncIsRegistering(false)}>
-                    Existing account
-                  </button>
-                </div>
-                <label>
-                  Worker URL
-                  <input value={syncFormUrl} onChange={(e) => setSyncFormUrl(e.target.value)} placeholder="https://your-worker.workers.dev" required />
-                </label>
-                <label>
-                  Username
-                  <input value={syncFormUsername} onChange={(e) => setSyncFormUsername(e.target.value)} autoComplete="username" required />
-                </label>
-                <label>
-                  Sync password
-                  <input type="password" value={syncFormPassword} onChange={(e) => setSyncFormPassword(e.target.value)} autoComplete="new-password" required />
-                </label>
-                {syncError && <p className="error">{syncError}</p>}
-                <div className="inline">
-                  <button type="submit">{syncIsRegistering ? 'Create & connect' : 'Connect'}</button>
-                  <button type="button" className="secondary" onClick={() => { setSyncOpen(false); setSyncError('') }}>
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            </section>
-          )}
-
-          <section className="entries">
-            {filteredItems.length === 0 ? (
-              <p className="empty">No entries yet.</p>
-            ) : (
-              filteredItems.map((item) => {
-                const age = getPasswordAge(item.updatedAt)
-                const faviconUrl = item.website ? getFaviconUrl(item.website) : ''
-                return (
-                  <article key={item.id} className="card item">
-                    <div>
-                      <div className="item-title">
-                        {faviconUrl && (
-                          <img
-                            src={faviconUrl}
-                            alt=""
-                            width={16}
-                            height={16}
-                            className="favicon"
-                            onError={(e) => {
-                              e.currentTarget.style.display = 'none'
-                            }}
-                          />
-                        )}
-                        <h3>{item.title}</h3>
-                      </div>
-                      <p>{item.username}</p>
-                      {item.website && (
-                        <a href={item.website.startsWith('http') ? item.website : `https://${item.website}`} target="_blank" rel="noreferrer">
-                          {item.website}
-                        </a>
-                      )}
-                      <p className="masked">{visiblePasswords[item.id] ? item.password : '••••••••••••'}</p>
-                      {age > 180 && (
-                        <p className="age-warning">Password not changed in {age} days</p>
-                      )}
-                      {item.notes && <p className="item-notes">{item.notes}</p>}
-                      {item.tags.length > 0 && (
-                        <div className="item-tags">
-                          {item.tags.map((tag) => (
-                            <span key={tag} className="tag-label">
-                              {tag}
-                            </span>
-                          ))}
+              <div className="item-list">
+                {filteredItems.length === 0 ? (
+                  <p className="empty">No entries yet. Click <strong>+ Add</strong> to get started.</p>
+                ) : (
+                  filteredItems.map((item) => {
+                    const faviconUrl = item.website ? getFaviconUrl(item.website) : ''
+                    const age = getPasswordAge(item.updatedAt)
+                    return (
+                      <article
+                        key={item.id}
+                        className="item-card"
+                        onClick={() => openItemDetail(item)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => e.key === 'Enter' && openItemDetail(item)}
+                      >
+                        <div className="item-card-left">
+                          {faviconUrl ? (
+                            <img
+                              src={faviconUrl}
+                              alt=""
+                              width={32}
+                              height={32}
+                              className="favicon-lg"
+                              onError={(e) => { e.currentTarget.style.display = 'none' }}
+                            />
+                          ) : (
+                            <div className="favicon-placeholder">{item.title[0]?.toUpperCase() ?? '?'}</div>
+                          )}
+                          <div className="item-card-info">
+                            <h3>{item.title}</h3>
+                            <p>{item.username}</p>
+                            {age > 180 && <span className="age-badge">Outdated</span>}
+                          </div>
                         </div>
-                      )}
-                      <p className="updated">Updated {new Date(item.updatedAt).toLocaleString()}</p>
+                        <div className="item-card-right" onClick={(e) => e.stopPropagation()}>
+                          <button type="button" className="secondary small" onClick={() => copyText(item.username, 'Username copied')}>
+                            User
+                          </button>
+                          <button type="button" className="secondary small" onClick={() => copyText(item.password, 'Password copied')}>
+                            PW
+                          </button>
+                        </div>
+                      </article>
+                    )
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal */}
+      {modalMode !== null && (
+        <div className="modal-backdrop" onClick={closeModal} role="dialog" aria-modal="true">
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <button type="button" className="modal-close" onClick={closeModal} aria-label="Close">×</button>
+
+            {modalMode === 'view' && selectedItem && (() => {
+              const item = selectedItem
+              const faviconUrl = item.website ? getFaviconUrl(item.website) : ''
+              const age = getPasswordAge(item.updatedAt)
+              return (
+                <div className="stack">
+                  <div className="item-title">
+                    {faviconUrl && (
+                      <img src={faviconUrl} alt="" width={24} height={24} className="favicon" onError={(e) => { e.currentTarget.style.display = 'none' }} />
+                    )}
+                    <h2 style={{ margin: 0 }}>{item.title}</h2>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Username</span>
+                    <span>{item.username}</span>
+                  </div>
+                  <div className="detail-row">
+                    <span className="detail-label">Password</span>
+                    <span className="masked">{visiblePasswords[item.id] ? item.password : '••••••••••••'}</span>
+                  </div>
+                  {item.website && (
+                    <div className="detail-row">
+                      <span className="detail-label">Website</span>
+                      <a href={item.website.startsWith('http') ? item.website : `https://${item.website}`} target="_blank" rel="noreferrer">
+                        {item.website}
+                      </a>
                     </div>
-                    <div className="inline">
-                      <button type="button" className="secondary" onClick={() => copyText(item.username, 'Username copied')}>
-                        Copy Username
-                      </button>
-                      <button type="button" className="secondary" onClick={() => copyText(item.password, 'Password copied')}>
-                        Copy Password
-                      </button>
-                      <button type="button" className="secondary" onClick={() => togglePasswordVisibility(item.id)}>
-                        {visiblePasswords[item.id] ? 'Hide' : 'Show'}
-                      </button>
+                  )}
+                  {item.notes && (
+                    <div className="detail-row">
+                      <span className="detail-label">Notes</span>
+                      <span>{item.notes}</span>
                     </div>
-                    <div className="inline">
-                      <button type="button" className="secondary" onClick={() => editEntry(item)}>
-                        Edit
-                      </button>
-                      <button type="button" className="danger" onClick={() => deleteEntry(item.id, item.title)}>
-                        Delete
-                      </button>
+                  )}
+                  {item.tags.length > 0 && (
+                    <div className="item-tags">
+                      {item.tags.map((tag) => <span key={tag} className="tag-label">{tag}</span>)}
                     </div>
-                  </article>
-                )
-              })
-            )}
-          </section>
-        </>
+                  )}
+                  {age > 180 && <p className="age-warning">Password not changed in {age} days</p>}
+                  <p className="updated">Updated {new Date(item.updatedAt).toLocaleString()}</p>
+                  <div className="inline">
+                    <button type="button" className="secondary" onClick={() => copyText(item.username, 'Username copied')}>Copy Username</button>
+                    <button type="button" className="secondary" onClick={() => copyText(item.password, 'Password copied')}>Copy Password</button>
+                    <button type="button" className="secondary" onClick={() => togglePasswordVisibility(item.id)}>
+                      {visiblePasswords[item.id] ? 'Hide' : 'Show'}
+                    </button>
+                  </div>
+                  <div className="inline">
+                    <button type="button" onClick={() => startEditEntry(item)}>Edit</button>
+                    <button type="button" className="danger" onClick={() => deleteEntry(item.id, item.title)}>Delete</button>
+                  </div>
+                </div>
+              )
+            })()}
+
+            {(modalMode === 'add' || modalMode === 'edit') && entryForm}
+          </div>
+        </div>
       )}
     </div>
   )
