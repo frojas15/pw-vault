@@ -48,8 +48,15 @@ type PrfResults = AuthenticationExtensionsClientOutputs & {
 
 type SortOrder = 'alpha' | 'recent'
 
+type SyncConfig = {
+  workerUrl: string
+  token: string
+  username: string
+}
+
 const STORAGE_KEY = 'password_vault_blob_v1'
 const WEBAUTHN_KEY = 'password_vault_webauthn'
+const SYNC_KEY = 'password_vault_sync_v1'
 const PASSWORD_GROUPS = [
   'ABCDEFGHJKLMNPQRSTUVWXYZ',
   'abcdefghijkmnpqrstuvwxyz',
@@ -414,6 +421,21 @@ function App() {
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [sortOrder, setSortOrder] = useState<SortOrder>('alpha')
   const [customTagInput, setCustomTagInput] = useState('')
+  const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(() => {
+    try {
+      const stored = localStorage.getItem(SYNC_KEY)
+      return stored ? (JSON.parse(stored) as SyncConfig) : null
+    } catch { return null }
+  })
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle')
+  const [syncOpen, setSyncOpen] = useState(false)
+  const [syncFormUsername, setSyncFormUsername] = useState('')
+  const [syncFormPassword, setSyncFormPassword] = useState('')
+  const [syncFormUrl, setSyncFormUrl] = useState('')
+  const [syncError, setSyncError] = useState('')
+  const [syncIsRegistering, setSyncIsRegistering] = useState(true)
+  const syncConfigRef = useRef<SyncConfig | null>(null)
+  syncConfigRef.current = syncConfig
   const fileInputRef = useRef<HTMLInputElement>(null)
   const backupFileRef = useRef<HTMLInputElement>(null)
   const [hasVault, setHasVault] = useState(() => Boolean(localStorage.getItem(STORAGE_KEY)))
@@ -435,7 +457,109 @@ function App() {
     setSelectedTags([])
     setShowFormPassword(false)
     setImportStatus('')
+    setSyncStatus('idle')
   }, [])
+
+  const applySyncConfig = (config: SyncConfig) => {
+    localStorage.setItem(SYNC_KEY, JSON.stringify(config))
+    setSyncConfig(config)
+  }
+
+  const removeSyncConfig = useCallback(() => {
+    localStorage.removeItem(SYNC_KEY)
+    setSyncConfig(null)
+    setSyncStatus('idle')
+  }, [])
+
+  const syncPush = useCallback(async (config: SyncConfig) => {
+    const blob = localStorage.getItem(STORAGE_KEY)
+    if (!blob) return
+    setSyncStatus('syncing')
+    try {
+      const res = await fetch(`${config.workerUrl}/api/vault`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blob }),
+      })
+      setSyncStatus(res.ok ? 'synced' : 'error')
+    } catch {
+      setSyncStatus('error')
+    }
+  }, [])
+
+  const syncPushRef = useRef(syncPush)
+  syncPushRef.current = syncPush
+
+  const syncMergeAndApply = useCallback(async (
+    config: SyncConfig,
+    password: string,
+    localItems: VaultItem[],
+  ): Promise<VaultItem[]> => {
+    setSyncStatus('syncing')
+    try {
+      const res = await fetch(`${config.workerUrl}/api/vault`, {
+        headers: { Authorization: `Bearer ${config.token}` },
+      })
+      if (!res.ok) {
+        setSyncStatus('error')
+        return localItems
+      }
+      const { blob: serverBlob } = (await res.json()) as { blob: string | null }
+      if (!serverBlob) {
+        await syncPush(config)
+        return localItems
+      }
+      const serverPayload = await decryptVault(password, serverBlob)
+      const serverItems = (serverPayload.items ?? []).map((i) => ({ ...i, tags: i.tags ?? [] }))
+      const byId = new Map(localItems.map((i) => [i.id, i]))
+      let changed = false
+      for (const si of serverItems) {
+        const local = byId.get(si.id)
+        if (!local || new Date(si.updatedAt) > new Date(local.updatedAt)) {
+          byId.set(si.id, si)
+          changed = true
+        }
+      }
+      const merged = Array.from(byId.values())
+      if (changed) {
+        const mergedBlob = await encryptVault(password, { items: merged })
+        localStorage.setItem(STORAGE_KEY, mergedBlob)
+        await syncPush(config)
+      }
+      setSyncStatus('synced')
+      return merged
+    } catch {
+      setSyncStatus('error')
+      return localItems
+    }
+  }, [syncPush])
+
+  const handleSyncSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSyncError('')
+    const url = syncFormUrl.trim().replace(/\/$/, '')
+    try {
+      const endpoint = syncIsRegistering ? '/api/register' : '/api/login'
+      const res = await fetch(`${url}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: syncFormUsername, password: syncFormPassword }),
+      })
+      const data = (await res.json()) as { token?: string; error?: string }
+      if (!res.ok) { setSyncError(data.error ?? 'Connection failed'); return }
+      const newConfig: SyncConfig = { workerUrl: url, token: data.token!, username: syncFormUsername }
+      applySyncConfig(newConfig)
+      setSyncOpen(false)
+      setSyncFormPassword('')
+      if (!isLocked && masterPassword) {
+        const merged = await syncMergeAndApply(newConfig, masterPassword, items)
+        setItems(merged)
+      }
+      setToast(`Sync ${syncIsRegistering ? 'enabled' : 'connected'}`)
+    } catch {
+      setSyncError('Could not reach the Worker URL. Double-check it and try again.')
+    }
+  }
 
   // Used by the Lock Now button — warns if user has unsaved form data
   const requestLock = useCallback(() => {
@@ -518,6 +642,8 @@ function App() {
       const blob = await encryptVault(masterPassword, { items: nextItems })
       localStorage.setItem(STORAGE_KEY, blob)
       setItems(nextItems)
+      const config = syncConfigRef.current
+      if (config) syncPushRef.current(config)
     },
     [masterPassword],
   )
@@ -548,14 +674,18 @@ function App() {
     event.preventDefault()
     try {
       const blob = localStorage.getItem(STORAGE_KEY)
-      if (!blob) {
-        setUnlockError('Could not unlock vault.')
-        return
-      }
+      if (!blob) { setUnlockError('Could not unlock vault.'); return }
       const payload = await decryptVault(masterPassword, blob)
-      setItems((payload.items ?? []).map((item) => ({ ...item, tags: item.tags ?? [] })))
+      const localItems = (payload.items ?? []).map((item) => ({ ...item, tags: item.tags ?? [] }))
+      setItems(localItems)
       setIsLocked(false)
       setUnlockError('')
+      const config = syncConfigRef.current
+      if (config) {
+        syncMergeAndApply(config, masterPassword, localItems).then((merged) => {
+          if (merged !== localItems) setItems(merged)
+        })
+      }
     } catch {
       setUnlockError('Could not unlock vault.')
     }
@@ -575,11 +705,18 @@ function App() {
         return
       }
       const payload = await decryptVault(unlockedMasterPassword, blob)
+      const localItems = (payload.items ?? []).map((item) => ({ ...item, tags: item.tags ?? [] }))
       setMasterPassword(unlockedMasterPassword)
-      setItems((payload.items ?? []).map((item) => ({ ...item, tags: item.tags ?? [] })))
+      setItems(localItems)
       setIsLocked(false)
       setUnlockError('')
       setToast('Unlocked with biometric')
+      const config = syncConfigRef.current
+      if (config) {
+        syncMergeAndApply(config, unlockedMasterPassword, localItems).then((merged) => {
+          if (merged !== localItems) setItems(merged)
+        })
+      }
     } catch {
       setUnlockError('Biometric authentication failed.')
     }
@@ -1024,6 +1161,24 @@ function App() {
                 Lock now
               </button>
             </div>
+            <div className="sync-bar">
+              {syncConfig ? (
+                <div className="sync-info">
+                  <span className={`sync-dot sync-dot--${syncStatus}`} />
+                  <span className="sync-user">{syncConfig.username}</span>
+                  <button type="button" className="secondary small" onClick={() => syncPushRef.current(syncConfig)}>
+                    Sync now
+                  </button>
+                  <button type="button" className="secondary small danger-text" onClick={removeSyncConfig}>
+                    Disconnect
+                  </button>
+                </div>
+              ) : (
+                <button type="button" className="secondary" onClick={() => setSyncOpen((v) => !v)}>
+                  Enable Cloud Sync
+                </button>
+              )}
+            </div>
             <input
               ref={fileInputRef}
               type="file"
@@ -1196,6 +1351,42 @@ function App() {
               </div>
             </form>
           </section>
+
+          {syncOpen && (
+            <section className="card">
+              <form onSubmit={handleSyncSubmit} className="stack">
+                <h2>Cloud Sync Setup</h2>
+                <p className="sync-note">Your vault is encrypted before it ever leaves your device.</p>
+                <div className="inline">
+                  <button type="button" className={syncIsRegistering ? '' : 'secondary'} onClick={() => setSyncIsRegistering(true)}>
+                    New account
+                  </button>
+                  <button type="button" className={!syncIsRegistering ? '' : 'secondary'} onClick={() => setSyncIsRegistering(false)}>
+                    Existing account
+                  </button>
+                </div>
+                <label>
+                  Worker URL
+                  <input value={syncFormUrl} onChange={(e) => setSyncFormUrl(e.target.value)} placeholder="https://your-worker.workers.dev" required />
+                </label>
+                <label>
+                  Username
+                  <input value={syncFormUsername} onChange={(e) => setSyncFormUsername(e.target.value)} autoComplete="username" required />
+                </label>
+                <label>
+                  Sync password
+                  <input type="password" value={syncFormPassword} onChange={(e) => setSyncFormPassword(e.target.value)} autoComplete="new-password" required />
+                </label>
+                {syncError && <p className="error">{syncError}</p>}
+                <div className="inline">
+                  <button type="submit">{syncIsRegistering ? 'Create & connect' : 'Connect'}</button>
+                  <button type="button" className="secondary" onClick={() => { setSyncOpen(false); setSyncError('') }}>
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </section>
+          )}
 
           <section className="entries">
             {filteredItems.length === 0 ? (

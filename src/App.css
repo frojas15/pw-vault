@@ -402,6 +402,51 @@ button:active {
   }
 }
 
+/* ── Sync bar ── */
+
+.sync-bar {
+  padding-top: 0.3rem;
+}
+
+.sync-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.sync-user {
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.sync-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #aab;
+}
+
+.sync-dot--syncing { background: #f1ae4f; }
+.sync-dot--synced  { background: #3ea76a; }
+.sync-dot--error   { background: #d11f4f; }
+
+.small {
+  padding: 0.4rem 0.65rem;
+  font-size: 0.85rem;
+}
+
+.danger-text {
+  color: #c02553;
+}
+
+.sync-note {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
 @media (min-width: 820px) {
   .controls {
     grid-template-columns: 2fr 1fr 1fr auto;
